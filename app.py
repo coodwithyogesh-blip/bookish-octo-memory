@@ -424,7 +424,7 @@ def handle_video(message):
         item_id = cur.lastrowid
     prompt = send_message(
         chat_id,
-        f"🎬 Video #{item_id} AI analysis ready!\\nTitle: {metadata['title']}\\n\\nAb apna custom thumbnail PHOTO ke roop mein is message ka reply karke bhejo. Thumbnail milte hi bot upload karega.",
+        f"🎬 Video #{item_id} AI analysis ready!\nTitle: {metadata['title']}\n\nAb apna custom thumbnail PHOTO ke roop mein is message ka reply karke bhejo. Thumbnail milte hi bot upload karega.",
         reply_markup={"force_reply": True, "selective": True},
     )
     with db() as con:
@@ -480,7 +480,7 @@ def handle_thumbnail(message):
             privacy = "public"
         try:
             yt_id = upload_video(pending["video_id"], privacy)
-            send_message(chat_id, f"🚀 Published ({privacy}) with your thumbnail!\\nhttps://youtu.be/{yt_id}")
+            send_message(chat_id, f"🚀 Published ({privacy}) with your thumbnail!\nhttps://youtu.be/{yt_id}")
         except Exception as exc:
             log.exception("Auto publish after thumbnail failed")
             send_message(chat_id, f"⚠️ Thumbnail saved, upload failed. Use /publish {pending['video_id']} after checking YouTube connection.\\n{exc}")
@@ -532,9 +532,9 @@ def telegram_loop():
                     else:
                         with db() as con:
                             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('telegram_group_id',?)", (str(chat_id),))
-                        send_message(chat_id, f"✅ Ye group YouTube Studio group se connect ho gaya.\\nGroup ID: {chat_id}\\nAb /allow USER_ID se team add karo.")
+                        send_message(chat_id, f"✅ Ye group YouTube Studio group se connect ho gaya.\nGroup ID: {chat_id}\\nAb /allow USER_ID se team add karo.")
                 elif text.startswith("/allow") and owner_group_command(message):
-                    match = re.search(r"/allow\\s+(-?\\d+)", text)
+                    match = re.search(r"/allow(?:@\w+)?\s+(-?\d+)", text)
                     if not match:
                         send_message(chat_id, "Use: /allow TELEGRAM_USER_ID (user ko pehle /whoami bhejne bolo)")
                     else:
@@ -543,7 +543,7 @@ def telegram_loop():
                             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?, 'true')", (f"team_user:{user_id}",))
                         send_message(chat_id, f"✅ Team member {user_id} ko access mil gaya.")
                 elif text.startswith("/revoke") and owner_group_command(message):
-                    match = re.search(r"/revoke\\s+(-?\\d+)", text)
+                    match = re.search(r"/revoke(?:@\w+)?\s+(-?\d+)", text)
                     if not match:
                         send_message(chat_id, "Use: /revoke TELEGRAM_USER_ID")
                     else:
@@ -564,7 +564,7 @@ def telegram_loop():
                         "resize_keyboard": True,
                         "is_persistent": True,
                     }
-                    send_message(chat_id, "🎬 YouTube AI Studio\\n\\nVideo bhejo → apna thumbnail reply karo → AI metadata ke saath auto upload.\\n\\nOwner: /bindgroup, /allow ID, /revoke ID.\\nTeam: /upload, /queue, /thumbnail ID, /publish ID, /schedule ID YYYY-MM-DD HH:MM.", reply_markup=keyboard)
+                    send_message(chat_id, "🎬 YouTube AI Studio\n\nVideo bhejo → apna thumbnail reply karo → AI metadata ke saath auto upload.\\n\\nOwner: /bindgroup, /allow ID, /revoke ID.\\nTeam: /upload, /queue, /thumbnail ID, /publish ID, /schedule ID YYYY-MM-DD HH:MM.", reply_markup=keyboard)
                 elif text.startswith("/help") and message_authorized(message):
                     send_message(chat_id, "Commands: /upload, /queue, /thumbnail ID, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM, /team. Owner-only: /bindgroup, /allow ID, /revoke ID.")
                 elif text.startswith("/upload") and message_authorized(message):
@@ -589,7 +589,7 @@ def telegram_loop():
                             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('upload_privacy',?)", (value,))
                         send_message(chat_id, f"Default upload privacy set to {value}.")
                 elif text.startswith("/thumbnail") and message_authorized(message):
-                    match = re.search(r"/thumbnail\\s+(\\d+)", text)
+                    match = re.search(r"/thumbnail(?:@\w+)?\s+(\d+)", text)
                     if not match:
                         send_message(chat_id, "Use: /thumbnail VIDEO_ID")
                     else:
