@@ -418,7 +418,7 @@ def dashboard():
       catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
     async function stopLive(){{try{{await managerApi('/api/live/stop',{{}});}}catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
     async function liveStatus(){{try{{await managerApi('/api/live/status');}}catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
-    async function saveSettings(){{const enabled=document.getElementById('autoReply').checked;const r=await fetch('/api/settings',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{auto_reply_enabled:enabled}})}});document.getElementById('saveStatus').textContent=r.ok?'Settings saved':'Save failed';}}</script></main></body></html>"""
+    async function saveSettings(){{const enabled=document.getElementById('autoReply').checked;const r=await fetch('/api/settings',{{method:'POST',headers:{{'Content-Type':'application/json','X-Manager-Token':document.getElementById('managerToken').value}},body:JSON.stringify({{auto_reply_enabled:enabled}})}});document.getElementById('saveStatus').textContent=r.ok?'Settings saved':'Save failed';}}</script></main></body></html>"""
 
 
 @app.get("/api/queue")
@@ -432,6 +432,8 @@ def queue_api():
 @app.route("/api/settings", methods=["GET", "POST"])
 def settings_api():
     if request.method == "POST":
+        if not manager_api_authorized():
+            return jsonify({"error": "Unauthorized"}), 401
         data = request.get_json(silent=True) or {}
         if "auto_reply_enabled" not in data or not isinstance(data["auto_reply_enabled"], bool):
             return jsonify({"error": "auto_reply_enabled boolean required"}), 400
