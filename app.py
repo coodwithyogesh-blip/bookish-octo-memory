@@ -469,9 +469,17 @@ def handle_thumbnail(message):
     finally:
         raw.unlink(missing_ok=True)
     with db() as con:
-        con.execute("UPDATE videos SET thumbnail_path=?, status='queued' WHERE id=?",
+        con.execute("UPDATE videos SET thumbnail_path=?, status=CASE WHEN youtube_video_id IS NULL THEN 'queued' ELSE status END WHERE id=?",
                     (str(thumb_path), pending["video_id"]))
         con.execute("DELETE FROM pending_thumbnails WHERE prompt_message_id=?", (prompt_id,))
+        saved_video = con.execute("SELECT youtube_video_id FROM videos WHERE id=?", (pending["video_id"],)).fetchone()
+    if saved_video and saved_video["youtube_video_id"]:
+        youtube_service().thumbnails().set(
+            videoId=saved_video["youtube_video_id"],
+            media_body=MediaFileUpload(str(thumb_path))
+        ).execute()
+        send_message(chat_id, f"✅ Existing YouTube video #{pending['video_id']} ka thumbnail update ho gaya.")
+        return
     send_message(chat_id, f"🖼 Custom thumbnail attached to video #{pending['video_id']}.")
     auto_publish = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "true")).lower() == "true"
     if auto_publish:
