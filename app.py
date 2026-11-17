@@ -138,11 +138,24 @@ def gemini_metadata(file_path, filename):
     model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
     prompt = ("You are a YouTube SEO editor. Return ONLY JSON with title (<=100 chars), "
               "description, tags (max 20 strings), hashtags (max 10 strings), category_id, language. "
-              "Use Hindi/Hinglish where appropriate. Never invent facts about the video. "
-              "If the filename is the only context, create a conservative title and say little. "
+              "Use Hindi/Hinglish where appropriate. Base suggestions on the supplied representative "
+              "video frame and filename. Do not claim events or details that are not visible or stated. "
               "Filename: " + filename)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-    body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}
+    parts = [{"text": prompt}]
+    frame = MEDIA / ("metadata_" + Path(file_path).stem + ".jpg")
+    try:
+        subprocess.run(["ffmpeg", "-y", "-ss", "00:00:03", "-i", str(file_path),
+                        "-frames:v", "1", str(frame)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+        parts.append({"inline_data": {"mime_type": "image/jpeg",
+                                      "data": base64.b64encode(frame.read_bytes()).decode("ascii")}})
+    except Exception as exc:
+        log.warning("Video frame analysis unavailable; using filename only: %s", exc)
+    finally:
+        frame.unlink(missing_ok=True)
+    body = {"contents": [{"parts": parts}],
+            "generationConfig": {"responseMimeType": "application/json"}}
     response = requests.post(url, json=body, timeout=90)
     response.raise_for_status()
     raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
