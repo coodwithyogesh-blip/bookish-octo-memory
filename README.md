@@ -12,7 +12,7 @@ Telegram-first YouTube creator automation for **@CoodWithYogesh**.
 - `/publish ID` uploads a queued video as **private** and applies the generated thumbnail when available.
 - Existing YouTube-to-Telegram new-upload notifications remain available through `python bot.py`.
 
-Automatic comment replies, scheduled publishing, and recorded-video livestream orchestration are the next build stages; they are not enabled in this initial manager build.
+Scheduled publishing and automatic comment replies are implemented in the codebase. Recorded-video livestream orchestration and the remaining dashboard controls are still pending.
 
 ## Local setup (Termux / Linux)
 
