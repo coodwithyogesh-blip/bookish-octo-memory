@@ -1,40 +1,37 @@
+import tempfile
 import unittest
-from database import Cursor
-from cloud_storage import is_remote
+from pathlib import Path
+from unittest.mock import patch
+
+from database import db, init_db
+from cloud_storage import configured, persist, materialize
 
 
-class CursorTranslationTests(unittest.TestCase):
-    def test_qmark_placeholders_translate_to_psycopg(self):
-        self.assertEqual(Cursor._translate("SELECT * FROM videos WHERE id=?"), "SELECT * FROM videos WHERE id=%s")
+class RenderLocalStorageTests(unittest.TestCase):
+    def test_database_initializes_and_inserts_video(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"DATABASE_PATH": str(Path(tmp) / "db.sqlite")}):
+                init_db()
+                with db() as con:
+                    cur = con.execute(
+                        "INSERT INTO videos(file_path,title,created_at) VALUES(?,?,?)",
+                        ("/tmp/video.mp4", "Test", "now"),
+                    )
+                    self.assertGreater(cur.lastrowid, 0)
+                with db() as con:
+                    row = con.execute("SELECT title FROM videos WHERE id=?", (cur.lastrowid,)).fetchone()
+                    self.assertEqual(row["title"], "Test")
 
-    def test_insert_ignore_becomes_on_conflict(self):
-        sql = Cursor._translate("INSERT OR IGNORE INTO processed_comments VALUES (?,?)")
-        self.assertIn("INSERT INTO processed_comments", sql)
-        self.assertTrue(sql.endswith("ON CONFLICT DO NOTHING"))
+    def test_no_external_storage_is_required(self):
+        self.assertFalse(configured())
 
-    def test_replace_settings_updates_value(self):
-        sql = Cursor._translate("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)")
-        self.assertIn("ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", sql)
-
-    def test_replace_pending_thumbnail_updates_fields(self):
-        sql = Cursor._translate("INSERT OR REPLACE INTO pending_thumbnails(prompt_message_id,chat_id,video_id,created_at) VALUES(?,?,?,?)")
-        self.assertIn("ON CONFLICT (prompt_message_id) DO UPDATE SET", sql)
-
-    def test_generated_ids_returned_for_video_inserts(self):
-        class FakeCursor:
-            def execute(self, statement, params):
-                self.statement = statement
-                self.params = params
-            def fetchone(self):
-                return {"id": 17}
-        fake = FakeCursor()
-        cur = Cursor(fake).execute("INSERT INTO videos(title) VALUES(?)", ("Test",))
-        self.assertEqual(cur.lastrowid, 17)
-        self.assertTrue(fake.statement.endswith("RETURNING id"))
-
-    def test_remote_storage_uri_detection(self):
-        self.assertTrue(is_remote("supabase://youtube-media/videos/a.mp4"))
-        self.assertFalse(is_remote("/tmp/a.mp4"))
+    def test_media_helpers_use_local_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "a.mp4"
+            source.write_bytes(b"video")
+            saved = persist(source, "videos/a.mp4")
+            self.assertEqual(saved, str(source))
+            self.assertEqual(materialize(saved, Path(tmp) / "copy.mp4"), str(source))
 
 
 if __name__ == "__main__":
