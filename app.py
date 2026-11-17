@@ -21,7 +21,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from database import db, init_db
-from cloud_storage import configured as storage_configured, persist as persist_file, materialize as materialize_file
+from cloud_storage import persist as persist_file, materialize as materialize_file
 
 from metadata import build_youtube_snippet, clean_metadata, parse_json_response
 from comment_manager import parse_reply_command, parse_comment_action, comment_notification
@@ -1118,8 +1118,6 @@ def start_background_services():
     with _services_lock:
         if _services_started:
             return
-        if not storage_configured():
-            raise RuntimeError("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY before starting the cloud service.")
         init_db()
         if os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
             configure_telegram_webhook()
