@@ -757,8 +757,16 @@ def telegram_webhook():
     ):
         return jsonify({"error": "Unauthorized"}), 401
     update = request.get_json(silent=True) or {}
+    update_id = update.get("update_id")
+    if update_id is None:
+        return jsonify({"error": "Missing update_id"}), 400
+    with db() as con:
+        cur = con.execute("INSERT OR IGNORE INTO processed_telegram_updates(update_id,created_at) VALUES(?,?)",
+                          (int(update_id), datetime.now(timezone.utc).isoformat()))
+    if cur.rowcount == 0:
+        return jsonify({"ok": True, "duplicate": True})
     threading.Thread(target=process_telegram_update, args=(update,), daemon=True,
-                     name=f"telegram-update-{update.get('update_id', 'unknown')}").start()
+                     name=f"telegram-update-{update_id}").start()
     return jsonify({"ok": True})
 
 
