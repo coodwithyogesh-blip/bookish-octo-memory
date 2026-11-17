@@ -226,7 +226,11 @@ def token_path():
 def restore_youtube_token():
     path = token_path()
     if not path.exists() and storage_configured():
-        materialize_file("supabase://" + os.getenv("SUPABASE_STORAGE_BUCKET", "youtube-media") + "/oauth/token.json", path)
+        try:
+            materialize_file("supabase://" + os.getenv("SUPABASE_STORAGE_BUCKET", "youtube-media") + "/oauth/token.json", path)
+        except requests.HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                raise
     return path
 
 
@@ -952,7 +956,7 @@ def oauth_start():
 @app.get("/oauth/callback")
 def oauth_callback():
     secrets = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "client_secret.json")
-    flow = Flow.from_client_secrets_file(secrets, scopes=SCOPES, state=app.config.get("oauth_state"),
+    flow = Flow.from_client_secrets_file(secrets, scopes=SCOPES, state=request.args.get("state"),
                                          redirect_uri=os.getenv("RENDER_EXTERNAL_URL", request.url_root).rstrip("/") + "/oauth/callback")
     # OAuth permits plain HTTP only for local development callbacks.
     # Never enable insecure OAuth transport for public/hosted domains.
@@ -1106,6 +1110,8 @@ def start_background_services():
     with _services_lock:
         if _services_started:
             return
+        if not storage_configured():
+            raise RuntimeError("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY before starting the cloud service.")
         init_db()
         if os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
             configure_telegram_webhook()
