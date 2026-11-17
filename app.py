@@ -1123,16 +1123,31 @@ def live_stop_api():
         return jsonify({"error": str(exc)}), 500
 
 
+_services_started = False
+_services_lock = threading.Lock()
+_background_scheduler = None
+
+
+def start_background_services():
+    global _services_started, _background_scheduler
+    with _services_lock:
+        if _services_started:
+            return
+        init_db()
+        if os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
+            threading.Thread(target=telegram_loop, daemon=True, name="telegram-poller").start()
+        _background_scheduler = BackgroundScheduler(timezone="UTC")
+        _background_scheduler.add_job(poll_comment_replies, "interval", minutes=2, id="comment-replies",
+                                      max_instances=1, coalesce=True)
+        _background_scheduler.add_job(process_scheduled_lives, "interval", seconds=30, id="scheduled-lives",
+                                      max_instances=1, coalesce=True)
+        _background_scheduler.start()
+        _services_started = True
+        log.info("Cloud background services started")
+
+
 def main():
-    init_db()
-    if os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
-        threading.Thread(target=telegram_loop, daemon=True, name="telegram-poller").start()
-    scheduler = BackgroundScheduler(timezone="UTC")
-    scheduler.add_job(poll_comment_replies, "interval", minutes=2, id="comment-replies",
-                      max_instances=1, coalesce=True)
-    scheduler.add_job(process_scheduled_lives, "interval", seconds=30, id="scheduled-lives",
-                      max_instances=1, coalesce=True)
-    scheduler.start()
+    start_background_services()
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
