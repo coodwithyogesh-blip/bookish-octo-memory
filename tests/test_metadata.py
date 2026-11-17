@@ -19,6 +19,25 @@ class MetadataTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             clean_metadata({"title": " ", "description": "x"})
 
+    def test_youtube_snippet_includes_hashtags_and_category(self):
+        from metadata import build_youtube_snippet
+        result = build_youtube_snippet({
+            "title": "AI Tutorial", "description": "Learn AI", "tags": ["AI", "Python"],
+            "hashtags": ["#AI", "#Python"], "category_id": "28"
+        })
+        self.assertEqual(result["title"], "AI Tutorial")
+        self.assertIn("#AI #Python", result["description"])
+        self.assertEqual(result["tags"], ["AI", "Python"])
+        self.assertEqual(result["categoryId"], "28")
+
+    def test_youtube_snippet_avoids_duplicate_hashtags(self):
+        from metadata import build_youtube_snippet
+        result = build_youtube_snippet({
+            "title": "AI Tutorial", "description": "Learn AI\\n\\n#AI", "tags": [],
+            "hashtags": ["#AI", "#Python"]
+        })
+        self.assertEqual(result["description"].count("#AI"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
