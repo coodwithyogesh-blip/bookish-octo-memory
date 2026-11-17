@@ -58,7 +58,7 @@ class RecordedLiveManager:
                 "snippet": {"title": title[:100]},
                 "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
                 "contentDetails": {
-                    "enableAutoStart": False,
+                    "enableAutoStart": True,
                     "enableAutoStop": False,
                     "recordFromStart": True,
                 },
@@ -72,7 +72,7 @@ class RecordedLiveManager:
         ingest_url = ingest["ingestionAddress"].rstrip("/") + "/" + ingest["streamName"]
         command = build_ffmpeg_command(path, ingest_url, loop=loop)
         try:
-            self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             youtube.liveBroadcasts().delete(id=broadcast_id).execute()
             raise
