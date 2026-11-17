@@ -554,7 +554,21 @@ def telegram_loop():
                 elif text.startswith("/team") and message_authorized(message):
                     send_message(chat_id, "Authorized team IDs: " + (", ".join(team_user_ids()) or "No team members yet."))
                 elif text.startswith("/start") and (message_authorized(message) or owner_group_command(message)):
-                    send_message(chat_id, "🎬 YouTube AI Studio ready.\\n/bindgroup (owner) · /whoami · /allow ID · /revoke ID · /team · /upload · /queue · /autopublish on|off · /privacy public|unlisted|private · /thumbnail ID · /publish ID · /schedule ID YYYY-MM-DD HH:MM")
+                    keyboard = {
+                        "keyboard": [
+                            [{"text": "/upload"}, {"text": "/queue"}],
+                            [{"text": "/autopublish on"}, {"text": "/autopublish off"}],
+                            [{"text": "/privacy public"}, {"text": "/privacy unlisted"}, {"text": "/privacy private"}],
+                            [{"text": "/team"}, {"text": "/help"}],
+                        ],
+                        "resize_keyboard": True,
+                        "is_persistent": True,
+                    }
+                    send_message(chat_id, "🎬 YouTube AI Studio\\n\\nVideo bhejo → apna thumbnail reply karo → AI metadata ke saath auto upload.\\n\\nOwner: /bindgroup, /allow ID, /revoke ID.\\nTeam: /upload, /queue, /thumbnail ID, /publish ID, /schedule ID YYYY-MM-DD HH:MM.", reply_markup=keyboard)
+                elif text.startswith("/help") and message_authorized(message):
+                    send_message(chat_id, "Commands: /upload, /queue, /thumbnail ID, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM, /team. Owner-only: /bindgroup, /allow ID, /revoke ID.")
+                elif text.startswith("/upload") and message_authorized(message):
+                    send_message(chat_id, "📤 Ab isi group mein video file bhejo. AI title, description, tags aur hashtags banayega; phir apni thumbnail image bot ke prompt ka reply karke bhejo.")
                 elif text.startswith("/autopublish") and message_authorized(message):
                     value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
                     if value not in ("on", "off"):
