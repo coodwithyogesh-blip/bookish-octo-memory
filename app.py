@@ -335,30 +335,48 @@ def handle_video(message):
 
 def telegram_loop():
     offset = None
+    retry_delay = 5
+
     while not stop_event.is_set():
         try:
             params = {"timeout": 25}
             if offset is not None:
                 params["offset"] = offset
+
             token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
             if not token:
-                time.sleep(5)
+                stop_event.wait(5)
                 continue
-            res = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", params=params, timeout=35)
+
+            res = requests.get(
+                f"https://api.telegram.org/bot{token}/getUpdates",
+                params=params,
+                timeout=(10, 35),
+            )
             res.raise_for_status()
-            for update in res.json().get("result", []):
+            payload = res.json()
+            if not payload.get("ok"):
+                raise RuntimeError("Telegram getUpdates returned ok=false")
+
+            # A successful poll resets the backoff.
+            retry_delay = 5
+
+            for update in payload.get("result", []):
                 offset = update["update_id"] + 1
                 message = update.get("message", {})
                 text = (message.get("text") or "").strip()
                 chat_id = message.get("chat", {}).get("id")
+                if not chat_id:
+                    continue
+
                 if text.startswith("/start"):
                     send_message(chat_id, "YouTube AI Manager ready. Video bhejo. Commands: /queue, /publish ID, /schedule ID YYYY-MM-DD HH:MM")
                 elif text.startswith("/queue") and owner_allowed(message.get("from", {}).get("id")):
                     with db() as con:
                         rows = con.execute("SELECT id,title,status FROM videos ORDER BY id DESC LIMIT 10").fetchall()
-                    send_message(chat_id, "\n".join([f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]) or "Queue empty.")
+                    send_message(chat_id, "\\n".join([f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]) or "Queue empty.")
                 elif text.startswith("/schedule") and owner_allowed(message.get("from", {}).get("id")):
-                    match = re.search(r"/schedule\s+(\d+)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", text)
+                    match = re.search(r"/schedule\\s+(\\d+)\\s+(\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2})", text)
                     if not match:
                         send_message(chat_id, "Use: /schedule 1 2026-11-20 19:30 (India time)")
                     else:
@@ -369,25 +387,30 @@ def telegram_loop():
                             log.exception("Schedule upload failed")
                             send_message(chat_id, f"Schedule failed: {exc}")
                 elif text.startswith("/publish") and owner_allowed(message.get("from", {}).get("id")):
-                    match = re.search(r"/publish\s+(\d+)", text)
+                    match = re.search(r"/publish\\s+(\\d+)", text)
                     if not match:
                         send_message(chat_id, "Use: /publish 1")
                     else:
                         try:
                             yt_id = upload_video(int(match.group(1)), "private")
-                            send_message(chat_id, f"✅ YouTube par private upload complete: https://youtu.be/{yt_id}\nPublic karne ke liye YouTube Studio mein review karo.")
+                            send_message(chat_id, f"✅ YouTube par private upload complete: https://youtu.be/{yt_id}\\nPublic karne ke liye YouTube Studio mein review karo.")
                         except Exception as exc:
                             log.exception("Upload failed")
                             send_message(chat_id, f"Upload failed: {exc}")
-                elif message.get("video") or (message.get("document", {}).get("mime_type", "").startswith("video/")):
+                elif message.get("video") or message.get("document", {}).get("mime_type", "").startswith("video/"):
                     try:
                         handle_video(message)
                     except Exception as exc:
                         log.exception("Telegram video handling failed")
                         send_message(chat_id, f"Video process nahi hua: {exc}")
+
+        except requests.exceptions.RequestException:
+            log.exception("Telegram network error; retrying in %s seconds", retry_delay)
+            stop_event.wait(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
         except Exception:
-            log.exception("Telegram polling error")
-            time.sleep(5)
+            log.exception("Telegram polling/handler error")
+            stop_event.wait(5)
 
 
 @app.get("/")
