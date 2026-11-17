@@ -379,7 +379,7 @@ def handle_video(message):
             (file_id,str(target),name,metadata["title"],metadata["description"],json.dumps(metadata["tags"]),
              json.dumps(metadata["hashtags"]),thumb_path,"queued",datetime.now(timezone.utc).isoformat()))
         item_id = cur.lastrowid
-    send_message(chat_id, f"✅ Video ready!\\nID: {item_id}\\nTitle: {metadata['title']}\\nAI thumbnail: {'ready' if thumb_path else 'fallback unavailable'}")
+    send_message(chat_id, f"✅ Video ready!\nID: {item_id}\\nTitle: {metadata['title']}\\nAI thumbnail: {'ready' if thumb_path else 'fallback unavailable'}")
     auto_publish = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "true")).lower() == "true"
     if auto_publish:
         privacy = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "public")).lower()
@@ -387,7 +387,7 @@ def handle_video(message):
             privacy = "public"
         try:
             yt_id = upload_video(item_id, privacy)
-            send_message(chat_id, f"🚀 Auto upload complete ({privacy})!\\nhttps://youtu.be/{yt_id}")
+            send_message(chat_id, f"🚀 Auto upload complete ({privacy})!\nhttps://youtu.be/{yt_id}")
         except Exception as exc:
             log.exception("Automatic YouTube upload failed")
             send_message(chat_id, f"⚠️ AI processing complete, lekin upload fail hua. Queue ID {item_id}. Error: {exc}\\nYouTube connection/API settings check karo.")
