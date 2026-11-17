@@ -27,7 +27,7 @@ nano .env
 python app.py
 ```
 
-Open `http://127.0.0.1:10000` in your browser.
+Open `http://127.0.0.1:10000` in your browser. Sign in with username `owner` and the `DASHBOARD_PASSWORD` you set; enter `MANAGER_API_TOKEN` in the dashboard to enable write controls.
 
 Set these values in `.env`:
 - `DASHBOARD_PASSWORD`: required password for the web dashboard and its settings API.
@@ -37,6 +37,7 @@ Set these values in `.env`:
 - `GEMINI_API_KEY`: Google AI Studio key (optional; without it the bot uses a filename-based fallback).
 - `APP_SECRET`: long random secret.
 - `MANAGER_API_TOKEN`: separate long random token for dashboard write controls.
+- `DASHBOARD_PASSWORD`: strong password for the dashboard's HTTP Basic Auth login.
 - `YOUTUBE_CLIENT_SECRETS_FILE=client_secret.json`: Google OAuth Desktop/Web client JSON file.
 - `YOUTUBE_TOKEN_FILE=token.json`: generated OAuth token; do not commit it.
 
