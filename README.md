@@ -14,39 +14,35 @@ Telegram-first YouTube creator automation for **@CoodWithYogesh**.
 - `/publish ID` uploads a queued video as **private** and applies the generated thumbnail when available.
 - Existing YouTube-to-Telegram new-upload notifications remain available through `python bot.py`.
 
-Scheduled publishing, automatic comment replies, dashboard settings, and recorded-video YouTube Live controls are implemented in the codebase. The live stream can start immediately or be scheduled for a future India-time date/time, and loops the selected recording continuously until you stop it. It requires FFmpeg, an eligible YouTube channel with live streaming enabled, and an always-on host; the process stops if the host sleeps or restarts. The current live process is held in memory, so configure a persistent, always-on worker for long streams.
+Scheduled publishing, Telegram comment moderation/replies, dashboard comment inbox, dashboard settings, and recorded-video YouTube Live controls are implemented in the codebase. The live stream can start immediately or be scheduled for a future India-time date/time, and loops the selected recording continuously until you stop it. It requires FFmpeg, an eligible YouTube channel with live streaming enabled, and an always-on host; the process stops if the host sleeps or restarts. The current live process is held in memory, so configure a persistent, always-on worker for long streams.
 
-## Local setup (Termux / Linux)
+## Render-only deployment (no Termux / localhost)
 
-```bash
-pkg update -y
-pkg install python git ffmpeg -y
-git clone https://github.com/coodwithyogesh-blip/bookish-octo-memory.git
-cd bookish-octo-memory
-pip install -r requirements.txt
-cp .env.example .env
-nano .env
-python app.py
-```
+This project is designed to run entirely on Render. Do not start `app.py`, `bot.py`, or a local server on your phone or PC. The Render web service runs the Flask dashboard, Telegram long-polling bot, comment polling, scheduled uploads and recorded-live scheduler in one single Gunicorn process.
 
-Open `http://127.0.0.1:10000` in your browser. Sign in with username `owner` and the `DASHBOARD_PASSWORD` you set; enter `MANAGER_API_TOKEN` in the dashboard to enable write controls.
+1. Push/merge this branch to the deployment branch in GitHub.
+2. In Render, create or open a **Web Service** connected to this repository.
+3. Build command: `pip install -r requirements.txt`.
+4. Start command: `gunicorn wsgi:app --workers 1 --threads 8 --timeout 120` (also set in `Procfile`).
+5. Add a persistent disk and mount it at `/var/data`. Keep exactly one running Render instance because Telegram long polling and the in-process scheduler must not run twice.
+6. Add a Render Secret File named `client_secret.json` and set `YOUTUBE_CLIENT_SECRETS_FILE=/etc/secrets/client_secret.json`.
+7. Set `DATABASE_PATH=/var/data/manager.db`, `MEDIA_DIR=/var/data/media`, and `YOUTUBE_TOKEN_FILE=/var/data/token.json`.
+8. Set the environment variables listed below, then deploy.
 
-Set these values in `.env`:
-- `DASHBOARD_PASSWORD`: required password for the web dashboard and its settings API.
-- `MANAGER_API_TOKEN`: separate long random token used by dashboard schedule/live controls; enter the same value in the dashboard.
-- `TELEGRAM_BOT_TOKEN`: token from BotFather.
-- `OWNER_TELEGRAM_ID`: your numeric Telegram user ID; this account owns group binding and team permissions.
-- `TELEGRAM_GROUP_ID`: optional fixed group ID. Otherwise run `/bindgroup` in the target group as the owner.
-- The owner uses `/allow USER_ID` and `/revoke USER_ID` to manage approved team members.
-- `GEMINI_API_KEY`: Google AI Studio key (required for AI metadata and AI thumbnail generation; without it the bot uses a filename-based fallback).
-- `GEMINI_IMAGE_MODEL`: image model, default `gemini-3.1-flash-image`.
-- `AUTO_UPLOAD_DEFAULT=true`: automatically publish each Telegram video after AI processing.
-- `AUTO_UPLOAD_PRIVACY=public`: default visibility (`public`, `unlisted`, or `private`). Owner can change it with `/privacy`.
-- `APP_SECRET`: long random secret.
-- `MANAGER_API_TOKEN`: separate long random token for dashboard write controls.
-- `DASHBOARD_PASSWORD`: strong password for the dashboard's HTTP Basic Auth login.
-- `YOUTUBE_CLIENT_SECRETS_FILE=client_secret.json`: Google OAuth Desktop/Web client JSON file.
-- `YOUTUBE_TOKEN_FILE=token.json`: generated OAuth token; do not commit it.
+Required Render environment variables:
+- `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`, and `TELEGRAM_GROUP_ID` (or bind the group with `/bindgroup`).
+- `GEMINI_API_KEY`, `GEMINI_MODEL`, and `GEMINI_IMAGE_MODEL`.
+- `DASHBOARD_PASSWORD`, `MANAGER_API_TOKEN`, and `APP_SECRET` (all strong, unique secrets).
+- `YOUTUBE_CLIENT_SECRETS_FILE=/etc/secrets/client_secret.json`, `YOUTUBE_TOKEN_FILE=/var/data/token.json`.
+- `DATABASE_PATH=/var/data/manager.db`, `MEDIA_DIR=/var/data/media`.
+- `AUTO_UPLOAD_DEFAULT=false` initially; turn it on from Telegram only after testing.
+- `AUTO_UPLOAD_PRIVACY=private` initially.
+- `AUTO_REPLY_ENABLED=false` initially; comment replies require human approval by default.
+- `TIMEZONE=Asia/Kolkata`.
+
+Use a paid, always-on Render web instance with a persistent disk for reliable 24/7 polling and to keep the database, downloaded videos, and YouTube OAuth token across deploys. Render free web instances can sleep and do not provide the persistent storage needed for this always-on workflow. Do not scale this service to multiple instances while Telegram uses long polling.
+
+Dashboard URL: `https://YOUR-RENDER-SERVICE.onrender.com/`. Set Google OAuth's authorized redirect URI to `https://YOUR-RENDER-SERVICE.onrender.com/oauth/callback`. After deploy, open the dashboard and connect the YouTube channel once. The generated OAuth token is stored on the persistent disk.
 
 ## Google YouTube API setup
 
@@ -91,9 +87,9 @@ The bot only accepts commands and media from the bound group and owner-approved 
 
 Use a persistent disk for `manager.db`, `media/`, and `token.json`. A normal ephemeral web filesystem can lose queued videos and OAuth tokens after restart. Set the service start command to `python app.py`, configure all environment variables, and set the Google OAuth callback URL to the public HTTPS URL.
 
-## Existing notifier
+## YouTube comment management
 
-The original `bot.py` is retained. It monitors the configured YouTube channel RSS feed and posts new public uploads to the Telegram group. Run it separately only if you want those notifications too.
+The Render scheduler checks uploaded-video comments every two minutes and posts new comments to the connected Telegram group. Use `/comments` to list pending items, `/reply COMMENT_ID your text` to post your own reply, `/approve COMMENT_ID` or the inline Approve button to post the AI suggestion, `/skip COMMENT_ID` to dismiss, and `/deletecomment COMMENT_ID` to delete. Automatic AI replies are OFF by default; use `/autoreply on` only after you intentionally enable unattended replies. The dashboard's Comment inbox also supports manual replies.
 
 ## Tests
 
