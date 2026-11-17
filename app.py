@@ -846,7 +846,12 @@ def dashboard():
     @media(max-width:650px){{body{{padding:12px}}section{{padding:15px;border-radius:15px}}table{{display:block;overflow-x:auto;white-space:nowrap}}input{{width:100%}}}}
     </style></head><body><main><h1>🎬 YouTube AI Studio</h1>
     <p>Telegram video intake · AI metadata · Scheduled publishing · Automatic comment replies</p><p><a href='/oauth/start'>Connect YouTube channel</a> · <a href='/api/queue'>Queue JSON</a></p>
-    <section><h2>Automation settings</h2><label><input id='autoReply' type='checkbox' {'checked' if get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED","true")).lower()=="true" else ''}> Automatic comment replies</label><button onclick='saveSettings()'>Save settings</button><p id='saveStatus'></p></section>
+    <section><h2>Automation settings</h2><label><input id='autoReply' type='checkbox' {'checked' if get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED","false")).lower()=="true" else ''}> Automatic comment replies</label><button onclick='saveSettings()'>Save settings</button><p id='saveStatus'></p></section>
+    <section><h2>Comment inbox</h2><p>New YouTube comments · AI suggestions · Approve, reply, skip or delete</p>
+    <button onclick='loadComments()'>Refresh comments</button><pre id='commentInbox'>Press Refresh comments to load the inbox.</pre>
+    <p><label>Comment ID <input id='replyCommentId' placeholder='YouTube comment ID'></label></p>
+    <p><label>Your reply <input id='replyCommentText' placeholder='Type your reply'></label><button onclick='sendCommentReply()'>Send reply</button></p>
+    </section>
     <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section>
     <section><h2>Owner controls</h2>
     <label>Manager API token <input id='managerToken' type='password' placeholder='Set MANAGER_API_TOKEN in .env'></label>
@@ -866,6 +871,8 @@ def dashboard():
       const options={{method:body?'POST':'GET',headers:{{'X-Manager-Token':token,'Content-Type':'application/json'}}}};
       if(body)options.body=JSON.stringify(body);const r=await fetch(path,options);const d=await r.json();
       document.getElementById('controlStatus').textContent=JSON.stringify(d,null,2);if(!r.ok)throw Error(d.error||'Request failed');return d;}}
+    async function loadComments(){{try{{const rows=await managerApi('/api/comments?status=pending');document.getElementById('commentInbox').textContent=rows.length?rows.map(c=>'ID: '+c.comment_id+' | '+(c.video_title||'Video')+' | '+(c.author||'Viewer')+'\\n'+c.comment_text+'\\nAI: '+(c.suggested_reply||'No suggestion')+'\\nStatus: '+c.status).join('\\n\\n'):'No pending comments.';}}catch(e){{document.getElementById('commentInbox').textContent=e.message;}}}}
+    async function sendCommentReply(){{try{{const id=document.getElementById('replyCommentId').value.trim();const reply=document.getElementById('replyCommentText').value.trim();if(!id||!reply)throw Error('Comment ID and reply required');await managerApi('/api/comments/reply',{{comment_id:id,reply}});document.getElementById('replyCommentText').value='';await loadComments();}}catch(e){{document.getElementById('commentInbox').textContent=e.message;}}}}
     function videoId(){{return Number(document.getElementById('videoId').value);}}
     async function scheduleVideo(){{try{{const t=document.getElementById('publishAt').value;if(!videoId()||!t)throw Error('Video ID and time required');
       await managerApi('/api/schedule',{{video_id:videoId(),publish_at:t.replace('T',' ')}});}}catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
@@ -889,6 +896,63 @@ def queue_api():
 
 
 
+@app.get("/api/comments")
+def comments_api():
+    if not manager_api_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    status = request.args.get("status", "pending")
+    if status not in ("pending", "replied", "skipped", "deleted", "all"):
+        return jsonify({"error": "Invalid status"}), 400
+    with db() as con:
+        if status == "all":
+            rows = con.execute("SELECT * FROM comment_queue ORDER BY created_at DESC LIMIT 100").fetchall()
+        else:
+            rows = con.execute("SELECT * FROM comment_queue WHERE status=? ORDER BY created_at DESC LIMIT 100",
+                               (status,)).fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@app.post("/api/comments/reply")
+def comment_reply_api():
+    if not manager_api_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        comment_id = str(payload.get("comment_id", "")).strip()
+        reply_text = str(payload.get("reply", "")).strip()
+        publish_comment_reply(comment_id, reply_text)
+        return jsonify({"ok": True, "comment_id": comment_id})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/comments/action")
+def comment_action_api():
+    if not manager_api_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    comment_id = str(payload.get("comment_id", "")).strip()
+    action = str(payload.get("action", "")).strip().lower()
+    try:
+        if action == "approve":
+            with db() as con:
+                row = con.execute("SELECT suggested_reply FROM comment_queue WHERE comment_id=? AND status='pending'",
+                                  (comment_id,)).fetchone()
+            if not row or not row["suggested_reply"]:
+                raise ValueError("AI suggestion unavailable")
+            publish_comment_reply(comment_id, row["suggested_reply"])
+        elif action == "skip":
+            if not skip_comment(comment_id):
+                raise ValueError("Comment is not pending")
+        elif action == "delete":
+            delete_youtube_comment(comment_id)
+        else:
+            return jsonify({"error": "Action must be approve, skip, or delete"}), 400
+        return jsonify({"ok": True, "comment_id": comment_id, "action": action})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def settings_api():
     if request.method == "POST":
@@ -901,7 +965,7 @@ def settings_api():
             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_reply_enabled',?)",
                         ("true" if data["auto_reply_enabled"] else "false",))
     return jsonify({"auto_reply_enabled": get_setting(
-        "auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "true")) == "true"})
+        "auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "false")) == "true"})
 
 
 @app.get("/oauth/start")
