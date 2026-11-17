@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 import sqlite3
 
 from metadata import build_youtube_snippet, clean_metadata, parse_json_response
+from comment_manager import parse_reply_command, parse_comment_action, comment_notification
 from telegram_groups import is_authorized_user, is_allowed_group, parse_telegram_id
 from livestream import RecordedLiveManager
 import hmac
@@ -74,6 +75,18 @@ def init_db():
         )""")
         con.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
             comment_id TEXT PRIMARY KEY, replied_at TEXT NOT NULL
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS comment_queue (
+            comment_id TEXT PRIMARY KEY,
+            video_id TEXT NOT NULL,
+            video_title TEXT,
+            author TEXT,
+            comment_text TEXT NOT NULL,
+            suggested_reply TEXT,
+            reply_text TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            replied_at TEXT
         )""")
         con.execute("""CREATE TABLE IF NOT EXISTS pending_thumbnails (
             prompt_message_id INTEGER PRIMARY KEY,
@@ -338,47 +351,135 @@ def generate_comment_reply(comment_text):
     return answer
 
 
-def poll_comment_replies():
-    if get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "true")).lower() != "true":
+def publish_comment_reply(comment_id, reply_text):
+    if not reply_text or len(reply_text.strip()) > 10000:
+        raise ValueError("Reply 1-10000 characters ka hona chahiye.")
+    with db() as con:
+        row = con.execute("SELECT status FROM comment_queue WHERE comment_id=?", (comment_id,)).fetchone()
+    if not row:
+        raise ValueError("Comment ID nahi mila.")
+    if row["status"] != "pending":
+        raise ValueError("Ye comment ab pending nahi hai.")
+    youtube_service().comments().insert(
+        part="snippet",
+        body={"snippet": {"parentId": comment_id, "textOriginal": reply_text.strip()}}
+    ).execute()
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as con:
+        con.execute("UPDATE comment_queue SET status='replied',reply_text=?,replied_at=? WHERE comment_id=? AND status='pending'",
+                    (reply_text.strip(), now, comment_id))
+        con.execute("INSERT OR IGNORE INTO processed_comments VALUES (?,?)", (comment_id, now))
+    return True
+
+
+def skip_comment(comment_id):
+    with db() as con:
+        cur = con.execute("UPDATE comment_queue SET status='skipped' WHERE comment_id=? AND status='pending'",
+                          (comment_id,))
+    return cur.rowcount > 0
+
+
+def delete_youtube_comment(comment_id):
+    with db() as con:
+        row = con.execute("SELECT status FROM comment_queue WHERE comment_id=?", (comment_id,)).fetchone()
+    if not row:
+        raise ValueError("Comment ID nahi mila.")
+    youtube_service().comments().delete(id=comment_id).execute()
+    with db() as con:
+        con.execute("UPDATE comment_queue SET status='deleted' WHERE comment_id=?", (comment_id,))
+    return True
+
+
+def notify_new_comment(comment_id, video_title, author, comment, suggestion):
+    group_id = configured_group_id()
+    if not group_id:
+        log.warning("Comment %s pending but Telegram group is not bound", comment_id)
         return
+    message, keyboard = comment_notification(comment_id, video_title, author, comment, suggestion)
+    send_message(group_id, message, reply_markup=keyboard)
+
+
+def handle_comment_callback(callback):
+    callback_id = callback.get("id")
+    actor_message = callback.get("message") or {}
+    actor = {**actor_message, "from": callback.get("from") or {}}
+    data = parse_comment_action(callback.get("data"))
+    if not message_authorized(actor) or not data:
+        telegram_call("answerCallbackQuery", {"callback_query_id": callback_id,
+                                               "text": "Not authorized or invalid action", "show_alert": True})
+        return
+    action, comment_id = data
+    try:
+        if action == "approve":
+            with db() as con:
+                row = con.execute("SELECT suggested_reply FROM comment_queue WHERE comment_id=? AND status='pending'",
+                                  (comment_id,)).fetchone()
+            if not row or not row["suggested_reply"]:
+                raise ValueError("AI reply available nahi hai. /reply COMMENT_ID your text use karo.")
+            publish_comment_reply(comment_id, row["suggested_reply"])
+            send_message(actor_message.get("chat", {}).get("id"), f"✅ YouTube comment ka reply publish ho gaya. ID: {comment_id}")
+        else:
+            if not skip_comment(comment_id):
+                raise ValueError("Comment pending nahi hai ya pehle process ho chuka hai.")
+            send_message(actor_message.get("chat", {}).get("id"), f"⏭ Comment skip kar diya. ID: {comment_id}")
+        telegram_call("answerCallbackQuery", {"callback_query_id": callback_id, "text": "Done"})
+    except Exception as exc:
+        telegram_call("answerCallbackQuery", {"callback_query_id": callback_id, "text": str(exc)[:180], "show_alert": True})
+
+
+def poll_comment_replies():
     service = youtube_service()
     with db() as con:
-        videos = con.execute("SELECT youtube_video_id FROM videos WHERE youtube_video_id IS NOT NULL AND status IN ('uploaded','scheduled')").fetchall()
+        videos = con.execute("SELECT youtube_video_id,title FROM videos WHERE youtube_video_id IS NOT NULL AND status IN ('uploaded','scheduled')").fetchall()
     mine = service.channels().list(part="id", mine=True).execute()
     my_channel_id = (mine.get("items") or [{}])[0].get("id", "")
+    auto_reply = get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "false")).lower() == "true"
     for video in videos:
         try:
             result = service.commentThreads().list(part="snippet", videoId=video["youtube_video_id"],
-                                                   maxResults=20, order="time").execute()
+                                                   maxResults=100, order="time").execute()
             for thread in result.get("items", []):
                 top = thread["snippet"]["topLevelComment"]
                 comment_id = top["id"]
                 comment = top["snippet"].get("textOriginal", top["snippet"].get("textDisplay", ""))
+                author = top["snippet"].get("authorDisplayName", "Viewer")
                 author_id = top["snippet"].get("authorChannelId", {}).get("value", "")
                 if author_id and author_id == my_channel_id:
-                    with db() as con:
-                        con.execute("INSERT OR IGNORE INTO processed_comments VALUES (?,?)",
-                                    (comment_id, datetime.now(timezone.utc).isoformat()))
                     continue
                 with db() as con:
-                    done = con.execute("SELECT 1 FROM processed_comments WHERE comment_id=?", (comment_id,)).fetchone()
-                if done:
+                    exists = con.execute("SELECT 1 FROM comment_queue WHERE comment_id=?", (comment_id,)).fetchone()
+                    already_done = con.execute("SELECT 1 FROM processed_comments WHERE comment_id=?", (comment_id,)).fetchone()
+                if exists or already_done:
                     continue
-                if not comment_is_suitable(comment):
-                    with db() as con:
-                        con.execute("INSERT OR IGNORE INTO processed_comments VALUES (?,?)",
-                                    (comment_id, datetime.now(timezone.utc).isoformat()))
-                    continue
-                reply = generate_comment_reply(comment)
-                if not reply:
-                    continue
-                service.comments().insert(part="snippet", body={"snippet":{"parentId":comment_id,
-                                                                           "textOriginal":reply}}).execute()
+                suggestion = generate_comment_reply(comment) if comment_is_suitable(comment) else None
+                if auto_reply and suggestion:
+                    try:
+                        service.comments().insert(part="snippet", body={"snippet":{"parentId":comment_id,
+                                                                                   "textOriginal":suggestion}}).execute()
+                        status, replied_at, reply_text = "replied", datetime.now(timezone.utc).isoformat(), suggestion
+                        with db() as con:
+                            con.execute("""INSERT OR IGNORE INTO comment_queue
+                                (comment_id,video_id,video_title,author,comment_text,suggested_reply,reply_text,status,created_at,replied_at)
+                                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                                (comment_id, video["youtube_video_id"], video["title"], author, comment,
+                                 suggestion, reply_text, status, datetime.now(timezone.utc).isoformat(), replied_at))
+                            con.execute("INSERT OR IGNORE INTO processed_comments VALUES (?,?)", (comment_id, replied_at))
+                        continue
+                    except Exception:
+                        log.exception("Automatic reply failed for comment %s; sending for manual review", comment_id)
                 with db() as con:
-                    con.execute("INSERT OR IGNORE INTO processed_comments VALUES (?,?)",
-                                (comment_id, datetime.now(timezone.utc).isoformat()))
+                    cur = con.execute("""INSERT OR IGNORE INTO comment_queue
+                        (comment_id,video_id,video_title,author,comment_text,suggested_reply,status,created_at)
+                        VALUES(?,?,?,?,?,?, 'pending', ?)""",
+                        (comment_id, video["youtube_video_id"], video["title"], author, comment,
+                         suggestion, datetime.now(timezone.utc).isoformat()))
+                if cur.rowcount:
+                    try:
+                        notify_new_comment(comment_id, video["title"], author, comment, suggestion)
+                    except Exception:
+                        log.exception("Could not send Telegram notification for comment %s", comment_id)
         except Exception:
-            log.exception("Comment reply check failed for video %s", video["youtube_video_id"])
+            log.exception("Comment check failed for video %s", video["youtube_video_id"])
 
 
 def schedule_video_upload(video_id, local_time):
@@ -526,6 +627,13 @@ def telegram_loop():
 
             for update in payload.get("result", []):
                 offset = update["update_id"] + 1
+                callback = update.get("callback_query")
+                if callback:
+                    try:
+                        handle_comment_callback(callback)
+                    except Exception:
+                        log.exception("Comment callback failed")
+                    continue
                 message = update.get("message", {})
                 text = (message.get("text") or "").strip()
                 chat_id = message.get("chat", {}).get("id")
@@ -561,20 +669,75 @@ def telegram_loop():
                         send_message(chat_id, f"Access removed for {user_id}.")
                 elif text.startswith("/team") and message_authorized(message):
                     send_message(chat_id, "Authorized team IDs: " + (", ".join(team_user_ids()) or "No team members yet."))
+                elif text.startswith("/comments") and message_authorized(message):
+                    with db() as con:
+                        rows = con.execute("SELECT comment_id,video_title,author,comment_text FROM comment_queue WHERE status='pending' ORDER BY created_at DESC LIMIT 10").fetchall()
+                    if not rows:
+                        send_message(chat_id, "🎉 Koi pending comment nahi hai.")
+                    else:
+                        lines = [f"💬 {r['comment_id']} · {r['video_title'] or 'Video'}\n{r['author'] or 'Viewer'}: {r['comment_text'][:300]}" for r in rows]
+                        send_message(chat_id, "Pending comments:\n\n" + "\n\n".join(lines))
+                elif text.startswith("/reply") and message_authorized(message):
+                    try:
+                        comment_id, reply_text = parse_reply_command(text)
+                        publish_comment_reply(comment_id, reply_text)
+                        send_message(chat_id, f"✅ Reply YouTube par publish ho gaya. ID: {comment_id}")
+                    except Exception as exc:
+                        send_message(chat_id, f"Reply nahi bheja gaya: {exc}")
+                elif text.startswith("/approve") and message_authorized(message):
+                    match = re.search(r"/approve(?:@\w+)?\s+(\S+)", text)
+                    if not match:
+                        send_message(chat_id, "Use: /approve COMMENT_ID")
+                    else:
+                        try:
+                            with db() as con:
+                                row = con.execute("SELECT suggested_reply FROM comment_queue WHERE comment_id=? AND status='pending'", (match.group(1),)).fetchone()
+                            if not row or not row["suggested_reply"]:
+                                raise ValueError("AI suggestion nahi hai. /reply COMMENT_ID your text use karo.")
+                            publish_comment_reply(match.group(1), row["suggested_reply"])
+                            send_message(chat_id, "✅ AI reply publish ho gaya.")
+                        except Exception as exc:
+                            send_message(chat_id, f"Approve failed: {exc}")
+                elif text.startswith("/skip") and message_authorized(message):
+                    match = re.search(r"/skip(?:@\w+)?\s+(\S+)", text)
+                    if not match or not skip_comment(match.group(1)):
+                        send_message(chat_id, "Use: /skip COMMENT_ID (sirf pending comment)")
+                    else:
+                        send_message(chat_id, "⏭ Comment skipped.")
+                elif text.startswith("/deletecomment") and message_authorized(message):
+                    match = re.search(r"/deletecomment(?:@\w+)?\s+(\S+)", text)
+                    if not match:
+                        send_message(chat_id, "Use: /deletecomment COMMENT_ID")
+                    else:
+                        try:
+                            delete_youtube_comment(match.group(1))
+                            send_message(chat_id, "🗑 YouTube comment delete ho gaya.")
+                        except Exception as exc:
+                            send_message(chat_id, f"Delete failed: {exc}")
+                elif text.startswith("/autoreply") and message_authorized(message):
+                    value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+                    if value not in ("on", "off"):
+                        current = get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "false"))
+                        send_message(chat_id, f"Auto reply: {current}. Use /autoreply on or /autoreply off")
+                    else:
+                        with db() as con:
+                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_reply_enabled',?)",
+                                        ("true" if value == "on" else "false",))
+                        send_message(chat_id, f"Automatic comment replies {value.upper()}.")
                 elif text.startswith("/start") and (message_authorized(message) or owner_group_command(message)):
                     keyboard = {
                         "keyboard": [
                             [{"text": "/upload"}, {"text": "/queue"}],
                             [{"text": "/autopublish on"}, {"text": "/autopublish off"}],
                             [{"text": "/privacy public"}, {"text": "/privacy unlisted"}, {"text": "/privacy private"}],
-                            [{"text": "/team"}, {"text": "/help"}],
+                            [{"text": "/comments"}, {"text": "/team"}, {"text": "/help"}],
                         ],
                         "resize_keyboard": True,
                         "is_persistent": True,
                     }
                     send_message(chat_id, "🎬 YouTube AI Studio\n\nVideo bhejo → apna thumbnail reply karo → AI metadata ke saath auto upload.\n\nOwner: /bindgroup, /allow ID, /revoke ID.\nTeam: /upload, /queue, /thumbnail ID, /publish ID, /schedule ID YYYY-MM-DD HH:MM.", reply_markup=keyboard)
                 elif text.startswith("/help") and message_authorized(message):
-                    send_message(chat_id, "Commands: /upload, /queue, /thumbnail ID, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM, /team. Owner-only: /bindgroup, /allow ID, /revoke ID.")
+                    send_message(chat_id, "Commands: /upload, /queue, /thumbnail ID, /comments, /reply COMMENT_ID text, /approve COMMENT_ID, /skip COMMENT_ID, /deletecomment COMMENT_ID, /autoreply on|off, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM, /team. Owner-only: /bindgroup, /allow ID, /revoke ID.")
                 elif text.startswith("/upload") and message_authorized(message):
                     send_message(chat_id, "📤 Ab isi group mein video file bhejo. AI title, description, tags aur hashtags banayega; phir apni thumbnail image bot ke prompt ka reply karke bhejo.")
                 elif text.startswith("/autopublish") and message_authorized(message):
