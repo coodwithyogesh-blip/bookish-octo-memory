@@ -46,10 +46,10 @@ def build_youtube_snippet(metadata):
     """Build a YouTube API snippet and append generated hashtags once."""
     clean = clean_metadata(metadata)
     description = clean["description"].strip()
-    present = {tag.lower() for tag in re.findall(r"#[\\w]+", description)}
+    present = {tag.lower() for tag in re.findall(r"#[\w]+", description)}
     missing = [tag for tag in clean["hashtags"] if tag.lower() not in present]
     if missing:
-        description = (description + "\\n\\n" if description else "") + " ".join(missing)
+        description = (description + "\n\n" if description else "") + " ".join(missing)
     return {
         "title": clean["title"],
         "description": description[:5000],
