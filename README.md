@@ -30,6 +30,7 @@ python app.py
 Open `http://127.0.0.1:10000` in your browser.
 
 Set these values in `.env`:
+- `DASHBOARD_PASSWORD`: required password for the web dashboard and its settings API.
 - `TELEGRAM_BOT_TOKEN`: token from BotFather.
 - `OWNER_TELEGRAM_ID`: your numeric Telegram user ID; only this account can submit and publish videos.
 - `GEMINI_API_KEY`: Google AI Studio key (optional; without it the bot uses a filename-based fallback).
@@ -51,7 +52,8 @@ The first build intentionally uploads as **private**. Review the title, descript
 
 - `/start` — instructions
 - `/queue` — latest queued videos
-- `/publish ID` — upload a queued video privately, for example `/publish 3`
+- `/publish ID` — upload a queued video privately for review, for example `/publish 3`.
+- `/schedule ID YYYY-MM-DD HH:MM` — upload privately and set YouTube's scheduled public release time in `TIMEZONE` (default `Asia/Kolkata`). Example: `/schedule 3 2026-11-20 19:30`.
 - Send a video file — add it to the queue and generate metadata.
 
 Send a video as a Telegram video or as a document with a video MIME type. Add a caption to give the AI extra context.
