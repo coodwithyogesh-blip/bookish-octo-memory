@@ -12,7 +12,7 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, request
+from flask import Flask, jsonify, redirect, request, Response
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -70,6 +70,27 @@ def init_db():
         con.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
             comment_id TEXT PRIMARY KEY, replied_at TEXT NOT NULL
         )""")
+
+
+@app.before_request
+def protect_dashboard():
+    if request.path not in ("/", "/api/queue", "/api/settings"):
+        return None
+    password = os.getenv("DASHBOARD_PASSWORD", "").strip()
+    if not password:
+        return "Set DASHBOARD_PASSWORD in environment before opening the dashboard.", 503
+    auth = request.authorization
+    import hmac
+    if not auth or not hmac.compare_digest(auth.password or "", password):
+        return Response("Dashboard login required", 401,
+                        {"WWW-Authenticate": 'Basic realm="YouTube AI Manager"'})
+    return None
+
+
+def get_setting(key, default):
+    with db() as con:
+        row = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
 
 
 def owner_allowed(user_id):
@@ -210,7 +231,7 @@ def generate_comment_reply(comment_text):
 
 
 def poll_comment_replies():
-    if os.getenv("AUTO_REPLY_ENABLED", "true").lower() != "true":
+    if get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "true")).lower() != "true":
         return
     service = youtube_service()
     with db() as con:
@@ -360,7 +381,8 @@ def dashboard():
     table{{width:100%;border-collapse:collapse}}td,th{{padding:10px;border-bottom:1px solid #39465b;text-align:left}}
     a{{color:#60a5fa}}</style></head><body><main><h1>🎬 YouTube AI Manager</h1>
     <p>Telegram video intake · AI metadata · Scheduled publishing · Automatic comment replies</p><p><a href='/oauth/start'>Connect YouTube channel</a> · <a href='/api/queue'>Queue JSON</a></p>
-    <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section></main></body></html>"""
+    <section><h2>Automation settings</h2><label><input id='autoReply' type='checkbox' {'checked' if get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED","true")).lower()=="true" else ''}> Automatic comment replies</label><button onclick='saveSettings()'>Save settings</button><p id='saveStatus'></p></section>
+    <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section><script>async function saveSettings(){const enabled=document.getElementById('autoReply').checked;const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_reply_enabled:enabled})});document.getElementById('saveStatus').textContent=r.ok?'Settings saved':'Save failed';}</script></main></body></html>"""
 
 
 @app.get("/api/queue")
@@ -368,6 +390,20 @@ def queue_api():
     with db() as con:
         rows = con.execute("SELECT id,title,status,youtube_video_id,created_at FROM videos ORDER BY id DESC LIMIT 100").fetchall()
     return jsonify([dict(row) for row in rows])
+
+
+
+@app.route("/api/settings", methods=["GET", "POST"])
+def settings_api():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if "auto_reply_enabled" not in data or not isinstance(data["auto_reply_enabled"], bool):
+            return jsonify({"error": "auto_reply_enabled boolean required"}), 400
+        with db() as con:
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_reply_enabled',?)",
+                        ("true" if data["auto_reply_enabled"] else "false",))
+    return jsonify({"auto_reply_enabled": get_setting(
+        "auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "true")) == "true"})
 
 
 @app.get("/oauth/start")
