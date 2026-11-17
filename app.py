@@ -563,12 +563,12 @@ def process_telegram_update(update):
             handle_comment_callback(callback)
         except Exception:
             log.exception("Comment callback failed")
-        continue
+        return
     message = update.get("message", {})
     text = (message.get("text") or "").strip()
     chat_id = message.get("chat", {}).get("id")
     if not chat_id:
-        continue
+        return
 
     if text.startswith("/whoami"):
         send_message(chat_id, f"Your Telegram user ID: {message.get('from', {}).get('id')}")
