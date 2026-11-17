@@ -33,7 +33,7 @@ class MetadataTests(unittest.TestCase):
     def test_youtube_snippet_avoids_duplicate_hashtags(self):
         from metadata import build_youtube_snippet
         result = build_youtube_snippet({
-            "title": "AI Tutorial", "description": "Learn AI\\n\\n#AI", "tags": [],
+            "title": "AI Tutorial", "description": "Learn AI\n\n#AI", "tags": [],
             "hashtags": ["#AI", "#Python"]
         })
         self.assertEqual(result["description"].count("#AI"), 1)
