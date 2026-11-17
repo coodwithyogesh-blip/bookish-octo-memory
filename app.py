@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ from googleapiclient.http import MediaFileUpload
 from PIL import Image, ImageDraw, ImageFont
 import sqlite3
 
-from metadata import clean_metadata, parse_json_response
+from metadata import build_youtube_snippet, clean_metadata, parse_json_response
 from livestream import RecordedLiveManager
 import hmac
 
@@ -149,11 +150,47 @@ def gemini_metadata(file_path, filename):
 
 
 def make_thumbnail(video_path, title, output_path):
-    # Create a usable custom thumbnail from a real frame of the uploaded video.
+    """Generate a video-aware AI thumbnail; fall back to a real frame with title."""
     frame = MEDIA / (Path(output_path).stem + "_frame.jpg")
     try:
-        subprocess.run(["ffmpeg", "-y", "-ss", "00:00:02", "-i", str(video_path), "-frames:v", "1", str(frame)],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+        subprocess.run(["ffmpeg", "-y", "-ss", "00:00:02", "-i", str(video_path),
+                        "-frames:v", "1", str(frame)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+        key = os.getenv("GEMINI_API_KEY", "").strip()
+        if key:
+            image_bytes = frame.read_bytes()
+            prompt = (
+                "Create a striking YouTube thumbnail using this video frame as visual context. "
+                "Make it a polished, high-contrast, professional 16:9 creator thumbnail. "
+                "Keep the main subject recognizable, use bold cinematic lighting and a clean "
+                "composition. Add short, correctly spelled readable text: " + title[:55] +
+                ". Do not add logos, watermarks, fake people, or unrelated objects."
+            )
+            model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            body = {
+                "contents": [{"parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/jpeg",
+                                     "data": base64.b64encode(image_bytes).decode("ascii")}}
+                ]}],
+                "generationConfig": {"responseModalities": ["IMAGE"],
+                                     "imageConfig": {"aspectRatio": "16:9"}}
+            }
+            response = requests.post(url, json=body, timeout=180)
+            response.raise_for_status()
+            parts = response.json()["candidates"][0]["content"]["parts"]
+            for part in parts:
+                data = part.get("inlineData") or part.get("inline_data")
+                if data and data.get("data"):
+                    Path(output_path).write_bytes(base64.b64decode(data["data"]))
+                    Image.open(output_path).convert("RGB").resize((1280, 720)).save(output_path, quality=94)
+                    frame.unlink(missing_ok=True)
+                    return str(output_path)
+            raise RuntimeError("Gemini image model returned no image")
+    except Exception as exc:
+        log.warning("AI thumbnail unavailable; using frame fallback: %s", exc)
+    try:
         image = Image.open(frame).convert("RGB").resize((1280, 720))
         draw = ImageDraw.Draw(image, "RGBA")
         draw.rectangle((0, 470, 1280, 720), fill=(0, 0, 0, 185))
@@ -174,11 +211,12 @@ def make_thumbnail(video_path, title, output_path):
             draw.text((55, y), item, font=font, fill="white", stroke_width=2, stroke_fill="black")
             y += 68
         image.save(output_path, quality=92)
-        frame.unlink(missing_ok=True)
         return str(output_path)
     except Exception as exc:
-        log.warning("Thumbnail frame generation skipped: %s", exc)
+        log.warning("Thumbnail fallback failed: %s", exc)
         return None
+    finally:
+        frame.unlink(missing_ok=True)
 
 
 def youtube_service():
@@ -203,15 +241,13 @@ def upload_video(video_id, privacy="private", publish_at=None):
     status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": False}
     if publish_at:
         status["publishAt"] = publish_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    body = {
-        "snippet": {
-            "title": row["title"][:100],
-            "description": row["description"] or "",
-            "tags": json.loads(row["tags"] or "[]"),
-            "categoryId": "22",
-        },
-        "status": status,
-    }
+    snippet = build_youtube_snippet({
+        "title": row["title"],
+        "description": row["description"] or "",
+        "tags": json.loads(row["tags"] or "[]"),
+        "hashtags": json.loads(row["hashtags"] or "[]"),
+    })
+    body = {"snippet": snippet, "status": status}
     media = MediaFileUpload(row["file_path"], chunksize=-1, resumable=True)
     result = service.videos().insert(part="snippet,status", body=body, media_body=media).execute()
     yt_id = result["id"]
@@ -330,7 +366,20 @@ def handle_video(message):
             (file_id,str(target),name,metadata["title"],metadata["description"],json.dumps(metadata["tags"]),
              json.dumps(metadata["hashtags"]),thumb_path,"queued",datetime.now(timezone.utc).isoformat()))
         item_id = cur.lastrowid
-    send_message(chat_id, f"✅ Video queue mein add ho gaya!\nID: {item_id}\n\nTitle: {metadata['title']}\nTags: {', '.join(metadata['tags'][:8])}\n\nPublish ke liye /publish {item_id} bhejo. Abhi upload private rahega.")
+    send_message(chat_id, f"✅ Video ready!\\nID: {item_id}\\nTitle: {metadata['title']}\\nAI thumbnail: {'ready' if thumb_path else 'fallback unavailable'}")
+    auto_publish = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "true")).lower() == "true"
+    if auto_publish:
+        privacy = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "public")).lower()
+        if privacy not in ("public", "unlisted", "private"):
+            privacy = "public"
+        try:
+            yt_id = upload_video(item_id, privacy)
+            send_message(chat_id, f"🚀 Auto upload complete ({privacy})!\\nhttps://youtu.be/{yt_id}")
+        except Exception as exc:
+            log.exception("Automatic YouTube upload failed")
+            send_message(chat_id, f"⚠️ AI processing complete, lekin upload fail hua. Queue ID {item_id}. Error: {exc}\\nYouTube connection/API settings check karo.")
+    else:
+        send_message(chat_id, f"Auto upload OFF hai. Publish ke liye /publish {item_id} bhejo.")
 
 
 def telegram_loop():
@@ -370,7 +419,26 @@ def telegram_loop():
                     continue
 
                 if text.startswith("/start"):
-                    send_message(chat_id, "YouTube AI Manager ready. Video bhejo. Commands: /queue, /publish ID, /schedule ID YYYY-MM-DD HH:MM")
+                    send_message(chat_id, "YouTube AI Manager ready. Video bhejo. Commands: /queue, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM")
+                elif text.startswith("/autopublish") and owner_allowed(message.get("from", {}).get("id")):
+                    value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+                    if value not in ("on", "off"):
+                        current = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "true"))
+                        send_message(chat_id, f"Auto publish: {current}. Use /autopublish on or /autopublish off")
+                    else:
+                        with db() as con:
+                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_publish_enabled',?)",
+                                        ("true" if value == "on" else "false",))
+                        send_message(chat_id, f"Auto publish {value.upper()}.")
+                elif text.startswith("/privacy") and owner_allowed(message.get("from", {}).get("id")):
+                    value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+                    if value not in ("public", "unlisted", "private"):
+                        current = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "public"))
+                        send_message(chat_id, f"Upload privacy: {current}. Use /privacy public, /privacy unlisted, or /privacy private")
+                    else:
+                        with db() as con:
+                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('upload_privacy',?)", (value,))
+                        send_message(chat_id, f"Default upload privacy set to {value}.")
                 elif text.startswith("/queue") and owner_allowed(message.get("from", {}).get("id")):
                     with db() as con:
                         rows = con.execute("SELECT id,title,status FROM videos ORDER BY id DESC LIMIT 10").fetchall()
