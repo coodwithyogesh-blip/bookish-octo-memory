@@ -660,10 +660,20 @@ def dashboard():
         for r in rows
     )
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
-    <title>YouTube AI Manager</title><style>body{{font:16px Arial;background:#101827;color:#eef2ff;padding:20px}}
-    main{{max-width:900px;margin:auto}}section{{background:#1d293b;padding:16px;border-radius:14px}}
-    table{{width:100%;border-collapse:collapse}}td,th{{padding:10px;border-bottom:1px solid #39465b;text-align:left}}
-    a{{color:#60a5fa}}</style></head><body><main><h1>🎬 YouTube AI Manager</h1>
+    <title>YouTube AI Studio</title><style>
+    :root{{color-scheme:dark;font-family:Inter,system-ui,Arial,sans-serif;background:#080d18;color:#edf2ff}}
+    *{{box-sizing:border-box}}body{{margin:0;padding:22px;background:radial-gradient(circle at 15% 0%,#172554 0,#080d18 42%);min-height:100vh}}
+    main{{max-width:1120px;margin:0 auto}}h1{{font-size:clamp(28px,5vw,42px);letter-spacing:-1.4px;margin:10px 0}}
+    main>p{{color:#9eacc5;line-height:1.6}}section{{background:linear-gradient(145deg,#151f33,#101827);border:1px solid #26344c;padding:20px;border-radius:20px;margin:18px 0;box-shadow:0 14px 36px #0005}}
+    h2{{font-size:19px;margin:0 0 16px}}a{{color:#8db8ff;text-decoration:none}}a:hover{{color:#c5d9ff}}
+    button{{border:0;border-radius:11px;padding:11px 16px;background:linear-gradient(110deg,#2563eb,#7c3aed);color:white;font-weight:700;margin:6px 4px 6px 0;cursor:pointer}}
+    button:hover{{filter:brightness(1.12)}}input,select{{background:#0b1220;color:#eef2ff;border:1px solid #34445f;border-radius:10px;padding:10px;max-width:100%;margin:5px}}
+    label{{display:inline-flex;align-items:center;gap:8px;color:#cbd5e1;margin:8px 10px 8px 0}}
+    table{{width:100%;border-collapse:collapse;overflow:hidden}}td,th{{padding:13px 10px;border-bottom:1px solid #26344c;text-align:left}}
+    th{{color:#9fb2d0;font-size:12px;text-transform:uppercase;letter-spacing:.08em}}td{{color:#e5edff;font-size:14px}}
+    tr:last-child td{{border-bottom:0}}pre{{white-space:pre-wrap;background:#080e1a;border:1px solid #26344c;border-radius:12px;padding:14px;color:#a9c7ff;overflow:auto}}
+    @media(max-width:650px){{body{{padding:12px}}section{{padding:15px;border-radius:15px}}table{{display:block;overflow-x:auto;white-space:nowrap}}input{{width:100%}}}}
+    </style></head><body><main><h1>🎬 YouTube AI Studio</h1>
     <p>Telegram video intake · AI metadata · Scheduled publishing · Automatic comment replies</p><p><a href='/oauth/start'>Connect YouTube channel</a> · <a href='/api/queue'>Queue JSON</a></p>
     <section><h2>Automation settings</h2><label><input id='autoReply' type='checkbox' {'checked' if get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED","true")).lower()=="true" else ''}> Automatic comment replies</label><button onclick='saveSettings()'>Save settings</button><p id='saveStatus'></p></section>
     <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section>
