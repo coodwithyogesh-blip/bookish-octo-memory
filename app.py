@@ -556,221 +556,227 @@ def handle_thumbnail(message):
         send_message(chat_id, f"Thumbnail saved. Use /publish {pending['video_id']} when ready.")
 
 
-def telegram_loop():
-    offset = None
-    retry_delay = 5
-
-    while not stop_event.is_set():
+def process_telegram_update(update):
+    callback = update.get("callback_query")
+    if callback:
         try:
-            params = {"timeout": 25}
-            if offset is not None:
-                params["offset"] = offset
+            handle_comment_callback(callback)
+        except Exception:
+            log.exception("Comment callback failed")
+        continue
+    message = update.get("message", {})
+    text = (message.get("text") or "").strip()
+    chat_id = message.get("chat", {}).get("id")
+    if not chat_id:
+        continue
 
-            token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-            if not token:
-                stop_event.wait(5)
-                continue
+    if text.startswith("/whoami"):
+        send_message(chat_id, f"Your Telegram user ID: {message.get('from', {}).get('id')}")
+    elif text.startswith("/bindgroup") and owner_group_command(message):
+        if message.get("chat", {}).get("type") not in ("group", "supergroup"):
+            send_message(chat_id, "Ye command apne Telegram group mein bhejo.")
+        else:
+            with db() as con:
+                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('telegram_group_id',?)", (str(chat_id),))
+            send_message(chat_id, f"✅ Ye group YouTube Studio group se connect ho gaya.\nGroup ID: {chat_id}\nAb /allow USER_ID se team add karo.")
+    elif text.startswith("/allow") and owner_group_command(message):
+        match = re.search(r"/allow(?:@\w+)?\s+(-?\d+)", text)
+        if not match:
+            send_message(chat_id, "Use: /allow TELEGRAM_USER_ID (user ko pehle /whoami bhejne bolo)")
+        else:
+            user_id = parse_telegram_id(match.group(1))
+            with db() as con:
+                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?, 'true')", (f"team_user:{user_id}",))
+            send_message(chat_id, f"✅ Team member {user_id} ko access mil gaya.")
+    elif text.startswith("/revoke") and owner_group_command(message):
+        match = re.search(r"/revoke(?:@\w+)?\s+(-?\d+)", text)
+        if not match:
+            send_message(chat_id, "Use: /revoke TELEGRAM_USER_ID")
+        else:
+            user_id = parse_telegram_id(match.group(1))
+            with db() as con:
+                con.execute("DELETE FROM settings WHERE key=?", (f"team_user:{user_id}",))
+            send_message(chat_id, f"Access removed for {user_id}.")
+    elif text.startswith("/team") and message_authorized(message):
+        send_message(chat_id, "Authorized team IDs: " + (", ".join(team_user_ids()) or "No team members yet."))
+    elif text.startswith("/comments") and message_authorized(message):
+        with db() as con:
+            rows = con.execute("SELECT comment_id,video_title,author,comment_text FROM comment_queue WHERE status='pending' ORDER BY created_at DESC LIMIT 10").fetchall()
+        if not rows:
+            send_message(chat_id, "🎉 Koi pending comment nahi hai.")
+        else:
+            lines = [f"💬 {r['comment_id']} · {r['video_title'] or 'Video'}\n{r['author'] or 'Viewer'}: {r['comment_text'][:300]}" for r in rows]
+            send_message(chat_id, "Pending comments:\n\n" + "\n\n".join(lines))
+    elif text.startswith("/reply") and message_authorized(message):
+        try:
+            comment_id, reply_text = parse_reply_command(text)
+            publish_comment_reply(comment_id, reply_text)
+            send_message(chat_id, f"✅ Reply YouTube par publish ho gaya. ID: {comment_id}")
+        except Exception as exc:
+            send_message(chat_id, f"Reply nahi bheja gaya: {exc}")
+    elif text.startswith("/approve") and message_authorized(message):
+        match = re.search(r"/approve(?:@\w+)?\s+(\S+)", text)
+        if not match:
+            send_message(chat_id, "Use: /approve COMMENT_ID")
+        else:
+            try:
+                with db() as con:
+                    row = con.execute("SELECT suggested_reply FROM comment_queue WHERE comment_id=? AND status='pending'", (match.group(1),)).fetchone()
+                if not row or not row["suggested_reply"]:
+                    raise ValueError("AI suggestion nahi hai. /reply COMMENT_ID your text use karo.")
+                publish_comment_reply(match.group(1), row["suggested_reply"])
+                send_message(chat_id, "✅ AI reply publish ho gaya.")
+            except Exception as exc:
+                send_message(chat_id, f"Approve failed: {exc}")
+    elif text.startswith("/skip") and message_authorized(message):
+        match = re.search(r"/skip(?:@\w+)?\s+(\S+)", text)
+        if not match or not skip_comment(match.group(1)):
+            send_message(chat_id, "Use: /skip COMMENT_ID (sirf pending comment)")
+        else:
+            send_message(chat_id, "⏭ Comment skipped.")
+    elif text.startswith("/deletecomment") and message_authorized(message):
+        match = re.search(r"/deletecomment(?:@\w+)?\s+(\S+)", text)
+        if not match:
+            send_message(chat_id, "Use: /deletecomment COMMENT_ID")
+        else:
+            try:
+                delete_youtube_comment(match.group(1))
+                send_message(chat_id, "🗑 YouTube comment delete ho gaya.")
+            except Exception as exc:
+                send_message(chat_id, f"Delete failed: {exc}")
+    elif text.startswith("/autoreply") and message_authorized(message):
+        value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+        if value not in ("on", "off"):
+            current = get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "false"))
+            send_message(chat_id, f"Auto reply: {current}. Use /autoreply on or /autoreply off")
+        else:
+            with db() as con:
+                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_reply_enabled',?)",
+                            ("true" if value == "on" else "false",))
+            send_message(chat_id, f"Automatic comment replies {value.upper()}.")
+    elif text.startswith("/start") and (message_authorized(message) or owner_group_command(message)):
+        keyboard = {
+            "keyboard": [
+                [{"text": "/upload"}, {"text": "/queue"}],
+                [{"text": "/autopublish on"}, {"text": "/autopublish off"}],
+                [{"text": "/privacy public"}, {"text": "/privacy unlisted"}, {"text": "/privacy private"}],
+                [{"text": "/comments"}, {"text": "/team"}, {"text": "/help"}],
+            ],
+            "resize_keyboard": True,
+            "is_persistent": True,
+        }
+        send_message(chat_id, "🎬 YouTube AI Studio\n\nVideo bhejo → apna thumbnail reply karo → AI metadata ke saath auto upload.\n\nOwner: /bindgroup, /allow ID, /revoke ID.\nTeam: /upload, /queue, /thumbnail ID, /publish ID, /schedule ID YYYY-MM-DD HH:MM.", reply_markup=keyboard)
+    elif text.startswith("/help") and message_authorized(message):
+        send_message(chat_id, "Commands: /upload, /queue, /thumbnail ID, /comments, /reply COMMENT_ID text, /approve COMMENT_ID, /skip COMMENT_ID, /deletecomment COMMENT_ID, /autoreply on|off, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM, /team. Owner-only: /bindgroup, /allow ID, /revoke ID.")
+    elif text.startswith("/upload") and message_authorized(message):
+        send_message(chat_id, "📤 Ab isi group mein video file bhejo. AI title, description, tags aur hashtags banayega; phir apni thumbnail image bot ke prompt ka reply karke bhejo.")
+    elif text.startswith("/autopublish") and message_authorized(message):
+        value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+        if value not in ("on", "off"):
+            current = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "false"))
+            send_message(chat_id, f"Auto publish: {current}. Use /autopublish on or /autopublish off")
+        else:
+            with db() as con:
+                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_publish_enabled',?)",
+                            ("true" if value == "on" else "false",))
+            send_message(chat_id, f"Auto publish {value.upper()}.")
+    elif text.startswith("/privacy") and message_authorized(message):
+        value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+        if value not in ("public", "unlisted", "private"):
+            current = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "private"))
+            send_message(chat_id, f"Upload privacy: {current}. Use /privacy public, /privacy unlisted, or /privacy private")
+        else:
+            with db() as con:
+                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('upload_privacy',?)", (value,))
+            send_message(chat_id, f"Default upload privacy set to {value}.")
+    elif text.startswith("/thumbnail") and message_authorized(message):
+        match = re.search(r"/thumbnail(?:@\w+)?\s+(\d+)", text)
+        if not match:
+            send_message(chat_id, "Use: /thumbnail VIDEO_ID")
+        else:
+            video_id = int(match.group(1))
+            with db() as con:
+                row = con.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
+            if not row:
+                send_message(chat_id, "Video queue ID nahi mila.")
+            else:
+                prompt = send_message(chat_id, f"🖼 Video #{video_id} ke liye thumbnail PHOTO is message ka reply karke bhejo.", reply_markup={"force_reply": True, "selective": True})
+                with db() as con:
+                    con.execute("INSERT OR REPLACE INTO pending_thumbnails(prompt_message_id,chat_id,video_id,created_at) VALUES(?,?,?,?)",
+                                (prompt["message_id"], str(chat_id), video_id, datetime.now(timezone.utc).isoformat()))
+    elif text.startswith("/queue") and message_authorized(message):
+        with db() as con:
+            rows = con.execute("SELECT id,title,status FROM videos ORDER BY id DESC LIMIT 10").fetchall()
+        send_message(chat_id, "\n".join([f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]) or "Queue empty.")
+    elif text.startswith("/schedule") and message_authorized(message):
+        match = re.search(r"/schedule\s+(\d+)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", text)
+        if not match:
+            send_message(chat_id, "Use: /schedule 1 2026-11-20 19:30 (India time)")
+        else:
+            try:
+                yt_id, scheduled = schedule_video_upload(int(match.group(1)), match.group(2))
+                send_message(chat_id, f"Scheduled: {scheduled.strftime('%d-%m-%Y %I:%M %p')} UTC. Video: https://youtu.be/{yt_id}")
+            except Exception as exc:
+                log.exception("Schedule upload failed")
+                send_message(chat_id, f"Schedule failed: {exc}")
+    elif text.startswith("/publish") and message_authorized(message):
+        match = re.search(r"/publish\s+(\d+)", text)
+        if not match:
+            send_message(chat_id, "Use: /publish 1")
+        else:
+            try:
+                yt_id = upload_video(int(match.group(1)), "private")
+                send_message(chat_id, f"✅ YouTube par private upload complete: https://youtu.be/{yt_id}\nPublic karne ke liye YouTube Studio mein review karo.")
+            except Exception as exc:
+                log.exception("Upload failed")
+                send_message(chat_id, f"Upload failed: {exc}")
+    elif message.get("photo") or message.get("document", {}).get("mime_type", "").startswith("image/"):
+        try:
+            handle_thumbnail(message)
+        except Exception as exc:
+            log.exception("Telegram thumbnail handling failed")
+            send_message(chat_id, f"Thumbnail process nahi hua: {exc}")
+    elif message.get("video") or message.get("document", {}).get("mime_type", "").startswith("video/"):
+        try:
+            handle_video(message)
+        except Exception as exc:
+            log.exception("Telegram video handling failed")
+            send_message(chat_id, f"Video process nahi hua: {exc}")
 
-            res = requests.get(
-                f"https://api.telegram.org/bot{token}/getUpdates",
-                params=params,
-                timeout=(10, 35),
-            )
-            res.raise_for_status()
-            payload = res.json()
-            if not payload.get("ok"):
-                raise RuntimeError("Telegram getUpdates returned ok=false")
 
-            # A successful poll resets the backoff.
-            retry_delay = 5
 
-            for update in payload.get("result", []):
-                offset = update["update_id"] + 1
-                callback = update.get("callback_query")
-                if callback:
-                    try:
-                        handle_comment_callback(callback)
-                    except Exception:
-                        log.exception("Comment callback failed")
-                    continue
-                message = update.get("message", {})
-                text = (message.get("text") or "").strip()
-                chat_id = message.get("chat", {}).get("id")
-                if not chat_id:
-                    continue
+@app.post("/telegram/webhook")
+def telegram_webhook():
+    secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if not secret or not hmac.compare_digest(
+        request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), secret
+    ):
+        return jsonify({"error": "Unauthorized"}), 401
+    update = request.get_json(silent=True) or {}
+    threading.Thread(target=process_telegram_update, args=(update,), daemon=True,
+                     name=f"telegram-update-{update.get('update_id', 'unknown')}").start()
+    return jsonify({"ok": True})
 
-                if text.startswith("/whoami"):
-                    send_message(chat_id, f"Your Telegram user ID: {message.get('from', {}).get('id')}")
-                elif text.startswith("/bindgroup") and owner_group_command(message):
-                    if message.get("chat", {}).get("type") not in ("group", "supergroup"):
-                        send_message(chat_id, "Ye command apne Telegram group mein bhejo.")
-                    else:
-                        with db() as con:
-                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('telegram_group_id',?)", (str(chat_id),))
-                        send_message(chat_id, f"✅ Ye group YouTube Studio group se connect ho gaya.\nGroup ID: {chat_id}\nAb /allow USER_ID se team add karo.")
-                elif text.startswith("/allow") and owner_group_command(message):
-                    match = re.search(r"/allow(?:@\w+)?\s+(-?\d+)", text)
-                    if not match:
-                        send_message(chat_id, "Use: /allow TELEGRAM_USER_ID (user ko pehle /whoami bhejne bolo)")
-                    else:
-                        user_id = parse_telegram_id(match.group(1))
-                        with db() as con:
-                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?, 'true')", (f"team_user:{user_id}",))
-                        send_message(chat_id, f"✅ Team member {user_id} ko access mil gaya.")
-                elif text.startswith("/revoke") and owner_group_command(message):
-                    match = re.search(r"/revoke(?:@\w+)?\s+(-?\d+)", text)
-                    if not match:
-                        send_message(chat_id, "Use: /revoke TELEGRAM_USER_ID")
-                    else:
-                        user_id = parse_telegram_id(match.group(1))
-                        with db() as con:
-                            con.execute("DELETE FROM settings WHERE key=?", (f"team_user:{user_id}",))
-                        send_message(chat_id, f"Access removed for {user_id}.")
-                elif text.startswith("/team") and message_authorized(message):
-                    send_message(chat_id, "Authorized team IDs: " + (", ".join(team_user_ids()) or "No team members yet."))
-                elif text.startswith("/comments") and message_authorized(message):
-                    with db() as con:
-                        rows = con.execute("SELECT comment_id,video_title,author,comment_text FROM comment_queue WHERE status='pending' ORDER BY created_at DESC LIMIT 10").fetchall()
-                    if not rows:
-                        send_message(chat_id, "🎉 Koi pending comment nahi hai.")
-                    else:
-                        lines = [f"💬 {r['comment_id']} · {r['video_title'] or 'Video'}\n{r['author'] or 'Viewer'}: {r['comment_text'][:300]}" for r in rows]
-                        send_message(chat_id, "Pending comments:\n\n" + "\n\n".join(lines))
-                elif text.startswith("/reply") and message_authorized(message):
-                    try:
-                        comment_id, reply_text = parse_reply_command(text)
-                        publish_comment_reply(comment_id, reply_text)
-                        send_message(chat_id, f"✅ Reply YouTube par publish ho gaya. ID: {comment_id}")
-                    except Exception as exc:
-                        send_message(chat_id, f"Reply nahi bheja gaya: {exc}")
-                elif text.startswith("/approve") and message_authorized(message):
-                    match = re.search(r"/approve(?:@\w+)?\s+(\S+)", text)
-                    if not match:
-                        send_message(chat_id, "Use: /approve COMMENT_ID")
-                    else:
-                        try:
-                            with db() as con:
-                                row = con.execute("SELECT suggested_reply FROM comment_queue WHERE comment_id=? AND status='pending'", (match.group(1),)).fetchone()
-                            if not row or not row["suggested_reply"]:
-                                raise ValueError("AI suggestion nahi hai. /reply COMMENT_ID your text use karo.")
-                            publish_comment_reply(match.group(1), row["suggested_reply"])
-                            send_message(chat_id, "✅ AI reply publish ho gaya.")
-                        except Exception as exc:
-                            send_message(chat_id, f"Approve failed: {exc}")
-                elif text.startswith("/skip") and message_authorized(message):
-                    match = re.search(r"/skip(?:@\w+)?\s+(\S+)", text)
-                    if not match or not skip_comment(match.group(1)):
-                        send_message(chat_id, "Use: /skip COMMENT_ID (sirf pending comment)")
-                    else:
-                        send_message(chat_id, "⏭ Comment skipped.")
-                elif text.startswith("/deletecomment") and message_authorized(message):
-                    match = re.search(r"/deletecomment(?:@\w+)?\s+(\S+)", text)
-                    if not match:
-                        send_message(chat_id, "Use: /deletecomment COMMENT_ID")
-                    else:
-                        try:
-                            delete_youtube_comment(match.group(1))
-                            send_message(chat_id, "🗑 YouTube comment delete ho gaya.")
-                        except Exception as exc:
-                            send_message(chat_id, f"Delete failed: {exc}")
-                elif text.startswith("/autoreply") and message_authorized(message):
-                    value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
-                    if value not in ("on", "off"):
-                        current = get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED", "false"))
-                        send_message(chat_id, f"Auto reply: {current}. Use /autoreply on or /autoreply off")
-                    else:
-                        with db() as con:
-                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_reply_enabled',?)",
-                                        ("true" if value == "on" else "false",))
-                        send_message(chat_id, f"Automatic comment replies {value.upper()}.")
-                elif text.startswith("/start") and (message_authorized(message) or owner_group_command(message)):
-                    keyboard = {
-                        "keyboard": [
-                            [{"text": "/upload"}, {"text": "/queue"}],
-                            [{"text": "/autopublish on"}, {"text": "/autopublish off"}],
-                            [{"text": "/privacy public"}, {"text": "/privacy unlisted"}, {"text": "/privacy private"}],
-                            [{"text": "/comments"}, {"text": "/team"}, {"text": "/help"}],
-                        ],
-                        "resize_keyboard": True,
-                        "is_persistent": True,
-                    }
-                    send_message(chat_id, "🎬 YouTube AI Studio\n\nVideo bhejo → apna thumbnail reply karo → AI metadata ke saath auto upload.\n\nOwner: /bindgroup, /allow ID, /revoke ID.\nTeam: /upload, /queue, /thumbnail ID, /publish ID, /schedule ID YYYY-MM-DD HH:MM.", reply_markup=keyboard)
-                elif text.startswith("/help") and message_authorized(message):
-                    send_message(chat_id, "Commands: /upload, /queue, /thumbnail ID, /comments, /reply COMMENT_ID text, /approve COMMENT_ID, /skip COMMENT_ID, /deletecomment COMMENT_ID, /autoreply on|off, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM, /team. Owner-only: /bindgroup, /allow ID, /revoke ID.")
-                elif text.startswith("/upload") and message_authorized(message):
-                    send_message(chat_id, "📤 Ab isi group mein video file bhejo. AI title, description, tags aur hashtags banayega; phir apni thumbnail image bot ke prompt ka reply karke bhejo.")
-                elif text.startswith("/autopublish") and message_authorized(message):
-                    value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
-                    if value not in ("on", "off"):
-                        current = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "false"))
-                        send_message(chat_id, f"Auto publish: {current}. Use /autopublish on or /autopublish off")
-                    else:
-                        with db() as con:
-                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_publish_enabled',?)",
-                                        ("true" if value == "on" else "false",))
-                        send_message(chat_id, f"Auto publish {value.upper()}.")
-                elif text.startswith("/privacy") and message_authorized(message):
-                    value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
-                    if value not in ("public", "unlisted", "private"):
-                        current = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "private"))
-                        send_message(chat_id, f"Upload privacy: {current}. Use /privacy public, /privacy unlisted, or /privacy private")
-                    else:
-                        with db() as con:
-                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('upload_privacy',?)", (value,))
-                        send_message(chat_id, f"Default upload privacy set to {value}.")
-                elif text.startswith("/thumbnail") and message_authorized(message):
-                    match = re.search(r"/thumbnail(?:@\w+)?\s+(\d+)", text)
-                    if not match:
-                        send_message(chat_id, "Use: /thumbnail VIDEO_ID")
-                    else:
-                        video_id = int(match.group(1))
-                        with db() as con:
-                            row = con.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
-                        if not row:
-                            send_message(chat_id, "Video queue ID nahi mila.")
-                        else:
-                            prompt = send_message(chat_id, f"🖼 Video #{video_id} ke liye thumbnail PHOTO is message ka reply karke bhejo.", reply_markup={"force_reply": True, "selective": True})
-                            with db() as con:
-                                con.execute("INSERT OR REPLACE INTO pending_thumbnails(prompt_message_id,chat_id,video_id,created_at) VALUES(?,?,?,?)",
-                                            (prompt["message_id"], str(chat_id), video_id, datetime.now(timezone.utc).isoformat()))
-                elif text.startswith("/queue") and message_authorized(message):
-                    with db() as con:
-                        rows = con.execute("SELECT id,title,status FROM videos ORDER BY id DESC LIMIT 10").fetchall()
-                    send_message(chat_id, "\n".join([f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]) or "Queue empty.")
-                elif text.startswith("/schedule") and message_authorized(message):
-                    match = re.search(r"/schedule\s+(\d+)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", text)
-                    if not match:
-                        send_message(chat_id, "Use: /schedule 1 2026-11-20 19:30 (India time)")
-                    else:
-                        try:
-                            yt_id, scheduled = schedule_video_upload(int(match.group(1)), match.group(2))
-                            send_message(chat_id, f"Scheduled: {scheduled.strftime('%d-%m-%Y %I:%M %p')} UTC. Video: https://youtu.be/{yt_id}")
-                        except Exception as exc:
-                            log.exception("Schedule upload failed")
-                            send_message(chat_id, f"Schedule failed: {exc}")
-                elif text.startswith("/publish") and message_authorized(message):
-                    match = re.search(r"/publish\s+(\d+)", text)
-                    if not match:
-                        send_message(chat_id, "Use: /publish 1")
-                    else:
-                        try:
-                            yt_id = upload_video(int(match.group(1)), "private")
-                            send_message(chat_id, f"✅ YouTube par private upload complete: https://youtu.be/{yt_id}\nPublic karne ke liye YouTube Studio mein review karo.")
-                        except Exception as exc:
-                            log.exception("Upload failed")
-                            send_message(chat_id, f"Upload failed: {exc}")
-                elif message.get("photo") or message.get("document", {}).get("mime_type", "").startswith("image/"):
-                    try:
-                        handle_thumbnail(message)
-                    except Exception as exc:
-                        log.exception("Telegram thumbnail handling failed")
-                        send_message(chat_id, f"Thumbnail process nahi hua: {exc}")
-                elif message.get("video") or message.get("document", {}).get("mime_type", "").startswith("video/"):
-                    try:
-                        handle_video(message)
-                    except Exception as exc:
-                        log.exception("Telegram video handling failed")
-                        send_message(chat_id, f"Video process nahi hua: {exc}")
+
+def configure_telegram_webhook():
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    base = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if not token or not base or not secret:
+        log.warning("Telegram webhook not configured: set TELEGRAM_BOT_TOKEN, RENDER_EXTERNAL_URL and TELEGRAM_WEBHOOK_SECRET")
+        return
+    response = requests.post(
+        f"https://api.telegram.org/bot{token}/setWebhook",
+        json={"url": base + "/telegram/webhook", "secret_token": secret,
+              "allowed_updates": ["message", "callback_query"], "drop_pending_updates": False},
+        timeout=30,
+    )
+    response.raise_for_status()
+    if not response.json().get("ok"):
+        raise RuntimeError("Telegram setWebhook failed: " + response.text[:300])
+    log.info("Telegram webhook configured for Render")
+
+
 
         except requests.exceptions.RequestException:
             log.exception("Telegram network error; retrying in %s seconds", retry_delay)
@@ -1102,7 +1108,7 @@ def start_background_services():
             return
         init_db()
         if os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
-            threading.Thread(target=telegram_loop, daemon=True, name="telegram-poller").start()
+            configure_telegram_webhook()
         _background_scheduler = BackgroundScheduler(timezone="UTC")
         _background_scheduler.add_job(poll_comment_replies, "interval", minutes=2, id="comment-replies",
                                       max_instances=1, coalesce=True)
