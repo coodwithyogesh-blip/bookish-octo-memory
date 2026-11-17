@@ -888,6 +888,11 @@ def dashboard():
     async function saveSettings(){{const enabled=document.getElementById('autoReply').checked;const r=await fetch('/api/settings',{{method:'POST',headers:{{'Content-Type':'application/json','X-Manager-Token':document.getElementById('managerToken').value}},body:JSON.stringify({{auto_reply_enabled:enabled}})}});document.getElementById('saveStatus').textContent=r.ok?'Settings saved':'Save failed';}}</script></main></body></html>"""
 
 
+@app.get("/healthz")
+def health_check():
+    return jsonify({"ok": True, "service": "youtube-ai-studio"})
+
+
 @app.get("/api/queue")
 def queue_api():
     with db() as con:
