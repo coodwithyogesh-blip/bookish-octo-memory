@@ -22,6 +22,8 @@ from PIL import Image, ImageDraw, ImageFont
 import sqlite3
 
 from metadata import clean_metadata, parse_json_response
+from livestream import RecordedLiveManager
+import hmac
 
 load_dotenv()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s | %(levelname)s | %(message)s")
@@ -36,6 +38,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 stop_event = threading.Event()
+live_manager = RecordedLiveManager()
 
 
 def db():
@@ -433,6 +436,76 @@ def oauth_callback():
     flow.fetch_token(authorization_response=request.url)
     Path(os.getenv("YOUTUBE_TOKEN_FILE", "token.json")).write_text(flow.credentials.to_json(), encoding="utf-8")
     return "YouTube channel connected. You can close this page and send a video to your Telegram bot."
+
+
+
+def manager_api_authorized():
+    expected = os.getenv("MANAGER_API_TOKEN", "").strip()
+    supplied = request.headers.get("X-Manager-Token", "")
+    return bool(expected) and hmac.compare_digest(supplied, expected)
+
+
+@app.post("/api/schedule")
+def schedule_api():
+    if not manager_api_authorized():
+        return jsonify({"error": "Unauthorized. Configure MANAGER_API_TOKEN and send X-Manager-Token."}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        video_id = int(payload.get("video_id", 0))
+        local_time = str(payload.get("publish_at", "")).strip()
+        scheduled = parse_schedule(local_time, os.getenv("TIMEZONE", "Asia/Kolkata"))
+        yt_id, scheduled = schedule_video_upload(video_id, local_time)
+        return jsonify({"ok": True, "video_id": video_id, "youtube_video_id": yt_id,
+                        "publish_at_utc": scheduled.isoformat(),
+                        "timezone": os.getenv("TIMEZONE", "Asia/Kolkata")}), 201
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        log.exception("Dashboard scheduling failed")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/live/start")
+def live_start_api():
+    if not manager_api_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        video_id = int(payload.get("video_id", 0))
+        with db() as con:
+            row = con.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
+        if not row:
+            return jsonify({"error": "Video queue ID not found"}), 404
+        result = live_manager.start(
+            youtube_service(), row["file_path"], payload.get("title") or row["title"] or "Live stream",
+            privacy=payload.get("privacy", "private"),
+            loop=bool(payload.get("loop", True)),
+        )
+        return jsonify({"ok": True, **result, **live_manager.status()}), 201
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        log.exception("Recorded live start failed")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/live/status")
+def live_status_api():
+    if not manager_api_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(live_manager.status())
+
+
+@app.post("/api/live/stop")
+def live_stop_api():
+    if not manager_api_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        result = live_manager.stop(youtube_service())
+        return jsonify({"ok": True, **result})
+    except Exception as exc:
+        log.exception("Recorded live stop failed")
+        return jsonify({"error": str(exc)}), 500
 
 
 def main():
