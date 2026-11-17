@@ -582,9 +582,9 @@ def handle_thumbnail(message):
         send_message(chat_id, f"✅ Existing YouTube video #{pending['video_id']} ka thumbnail update ho gaya.")
         return
     send_message(chat_id, f"🖼 Custom thumbnail attached to video #{pending['video_id']}.")
-    auto_publish = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "true")).lower() == "true"
+    auto_publish = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "false")).lower() == "true"
     if auto_publish:
-        privacy = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "public")).lower()
+        privacy = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "private")).lower()
         if privacy not in ("public", "unlisted", "private"):
             privacy = "public"
         try:
@@ -743,7 +743,7 @@ def telegram_loop():
                 elif text.startswith("/autopublish") and message_authorized(message):
                     value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
                     if value not in ("on", "off"):
-                        current = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "true"))
+                        current = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "false"))
                         send_message(chat_id, f"Auto publish: {current}. Use /autopublish on or /autopublish off")
                     else:
                         with db() as con:
@@ -753,7 +753,7 @@ def telegram_loop():
                 elif text.startswith("/privacy") and message_authorized(message):
                     value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
                     if value not in ("public", "unlisted", "private"):
-                        current = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "public"))
+                        current = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "private"))
                         send_message(chat_id, f"Upload privacy: {current}. Use /privacy public, /privacy unlisted, or /privacy private")
                     else:
                         with db() as con:
