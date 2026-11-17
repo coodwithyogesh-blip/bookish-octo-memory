@@ -490,7 +490,7 @@ def oauth_start():
     secrets = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "client_secret.json")
     if not Path(secrets).exists():
         return "Upload Google OAuth client_secret.json and set YOUTUBE_CLIENT_SECRETS_FILE.", 400
-    flow = Flow.from_client_secrets_file(secrets, scopes=SCOPES, redirect_uri=request.url_root.rstrip("/") + "/oauth/callback")
+    flow = Flow.from_client_secrets_file(secrets, scopes=SCOPES, redirect_uri=os.getenv("RENDER_EXTERNAL_URL", request.url_root).rstrip("/") + "/oauth/callback")
     auth_url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     app.config["oauth_state"] = state
     return redirect(auth_url)
@@ -500,7 +500,7 @@ def oauth_start():
 def oauth_callback():
     secrets = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "client_secret.json")
     flow = Flow.from_client_secrets_file(secrets, scopes=SCOPES, state=app.config.get("oauth_state"),
-                                         redirect_uri=request.url_root.rstrip("/") + "/oauth/callback")
+                                         redirect_uri=os.getenv("RENDER_EXTERNAL_URL", request.url_root).rstrip("/") + "/oauth/callback")
     # OAuth permits plain HTTP only for local development callbacks.
     # Never enable insecure OAuth transport for public/hosted domains.
     local_hosts = {"127.0.0.1", "localhost", "::1"}
