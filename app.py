@@ -794,15 +794,6 @@ def configure_telegram_webhook():
 
 
 
-        except requests.exceptions.RequestException:
-            log.exception("Telegram network error; retrying in %s seconds", retry_delay)
-            stop_event.wait(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)
-        except Exception:
-            log.exception("Telegram polling/handler error")
-            stop_event.wait(5)
-
-
 @app.get("/")
 def dashboard():
     with db() as con:
