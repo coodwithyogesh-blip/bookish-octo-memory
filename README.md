@@ -12,7 +12,7 @@ Telegram-first YouTube creator automation for **@CoodWithYogesh**.
 - `/publish ID` uploads a queued video as **private** and applies the generated thumbnail when available.
 - Existing YouTube-to-Telegram new-upload notifications remain available through `python bot.py`.
 
-Scheduled publishing, automatic comment replies, dashboard settings, and recorded-video YouTube Live controls are implemented in the codebase. The live stream loops the selected recording continuously until you stop it. It requires FFmpeg, an eligible YouTube channel with live streaming enabled, and an always-on host; the process stops if the host sleeps or restarts. The current live process is held in memory, so configure a persistent, always-on worker for long streams.
+Scheduled publishing, automatic comment replies, dashboard settings, and recorded-video YouTube Live controls are implemented in the codebase. The live stream can start immediately or be scheduled for a future India-time date/time, and loops the selected recording continuously until you stop it. It requires FFmpeg, an eligible YouTube channel with live streaming enabled, and an always-on host; the process stops if the host sleeps or restarts. The current live process is held in memory, so configure a persistent, always-on worker for long streams.
 
 ## Local setup (Termux / Linux)
 
@@ -57,7 +57,7 @@ The `/publish ID` command intentionally uploads as **private**. `/schedule` uplo
 - `/queue` — latest queued videos
 - `/publish ID` — upload a queued video privately for review, for example `/publish 3`.
 - `/schedule ID YYYY-MM-DD HH:MM` — upload privately and set YouTube's scheduled public release time in `TIMEZONE` (default: `Asia/Kolkata`). Example: `/schedule 3 2026-11-20 19:30`.
-- Dashboard owner controls — schedule uploads, start/stop a recorded live stream, check live status, and enable/disable automatic comment replies.
+- Dashboard owner controls — schedule uploads, schedule/start/stop a recorded live stream, check live status, and enable/disable automatic comment replies.
 - Send a video file — add it to the queue and generate metadata.
 
 Send a video as a Telegram video or as a document with a video MIME type. Add a caption to give the AI extra context.
