@@ -26,12 +26,15 @@ SESSION.headers.update({"User-Agent": "Mozilla/5.0 (compatible; YouTubeTelegramN
 
 def parse_channel_id(page_html):
     """Extract the stable UC... channel ID from a YouTube channel page."""
-    patterns = [
-        r'<meta[^>]+itemprop=["\']channelId["\'][^>]+content=["\'](UC[\w-]+)',
-        r'"externalId"\s*:\s*"(UC[\w-]+)"',
-        r'"channelId"\s*:\s*"(UC[\w-]+)"',
-    ]
-    for pattern in patterns:
+    for tag in re.findall(r'<meta\\b[^>]*>', page_html):
+        if re.search(r'\\bitemprop=["\\']channelId["\\']', tag):
+            match = re.search(r'\\bcontent=["\\'](UC[\\w-]+)', tag)
+            if match:
+                return match.group(1)
+    for pattern in (
+        r'"externalId"\\s*:\\s*"(UC[\\w-]+)"',
+        r'"channelId"\\s*:\\s*"(UC[\\w-]+)"',
+    ):
         match = re.search(pattern, page_html)
         if match:
             return match.group(1)
