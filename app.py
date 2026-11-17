@@ -382,7 +382,7 @@ def dashboard():
     a{{color:#60a5fa}}</style></head><body><main><h1>🎬 YouTube AI Manager</h1>
     <p>Telegram video intake · AI metadata · Scheduled publishing · Automatic comment replies</p><p><a href='/oauth/start'>Connect YouTube channel</a> · <a href='/api/queue'>Queue JSON</a></p>
     <section><h2>Automation settings</h2><label><input id='autoReply' type='checkbox' {'checked' if get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED","true")).lower()=="true" else ''}> Automatic comment replies</label><button onclick='saveSettings()'>Save settings</button><p id='saveStatus'></p></section>
-    <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section><script>async function saveSettings(){const enabled=document.getElementById('autoReply').checked;const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_reply_enabled:enabled})});document.getElementById('saveStatus').textContent=r.ok?'Settings saved':'Save failed';}</script></main></body></html>"""
+    <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section><script>async function saveSettings(){{const enabled=document.getElementById('autoReply').checked;const r=await fetch('/api/settings',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{auto_reply_enabled:enabled}})}});document.getElementById('saveStatus').textContent=r.ok?'Settings saved':'Save failed';}}</script></main></body></html>"""
 
 
 @app.get("/api/queue")
