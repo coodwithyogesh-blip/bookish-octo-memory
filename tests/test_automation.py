@@ -24,5 +24,5 @@ class AutomationTests(unittest.TestCase):
         self.assertFalse(comment_is_suitable("x" * 1001))
 
 
-if __set_module__ if False else __name__ == "__main__":
+if __name__ == "__main__":
     unittest.main()
