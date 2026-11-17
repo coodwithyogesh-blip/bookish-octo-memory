@@ -506,7 +506,9 @@ def oauth_callback():
     local_hosts = {"127.0.0.1", "localhost", "::1"}
     if request.scheme == "http" and request.host.split(":")[0].strip("[]") in local_hosts:
         os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-    flow.fetch_token(authorization_response=request.url)
+    external_base = os.getenv("RENDER_EXTERNAL_URL", request.url_root).rstrip("/")
+    callback_url = external_base + request.full_path
+    flow.fetch_token(authorization_response=callback_url)
     Path(os.getenv("YOUTUBE_TOKEN_FILE", "token.json")).write_text(flow.credentials.to_json(), encoding="utf-8")
     return "YouTube channel connected. You can close this page and send a video to your Telegram bot."
 
