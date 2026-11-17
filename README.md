@@ -35,6 +35,7 @@ Set these values in `.env`:
 - `OWNER_TELEGRAM_ID`: your numeric Telegram user ID; only this account can submit and publish videos.
 - `GEMINI_API_KEY`: Google AI Studio key (optional; without it the bot uses a filename-based fallback).
 - `APP_SECRET`: long random secret.
+- `MANAGER_API_TOKEN`: separate long random token for dashboard write controls.
 - `YOUTUBE_CLIENT_SECRETS_FILE=client_secret.json`: Google OAuth Desktop/Web client JSON file.
 - `YOUTUBE_TOKEN_FILE=token.json`: generated OAuth token; do not commit it.
 
@@ -46,7 +47,7 @@ Set these values in `.env`:
 4. Download the client JSON as `client_secret.json` and keep it private.
 5. Open `/oauth/start` in the browser and authorize the YouTube channel.
 
-The first build intentionally uploads as **private**. Review the title, description, thumbnail, and video in YouTube Studio before making it public.
+The first build intentionally uploads as **private**. Review the title, description, thumbnail, and video in YouTube Studio before making it public. Scheduled uploads use YouTube's publishAt feature; the video is uploaded privately when the schedule is created and becomes public at the requested time.
 
 ## Telegram commands
 
