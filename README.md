@@ -6,7 +6,7 @@ Telegram-first YouTube creator automation for **@CoodWithYogesh**.
 
 - Telegram bot receives owner-submitted video files and downloads them to the server.
 - AI metadata generation uses Gemini when `GEMINI_API_KEY` is configured.
-- A usable 1280x720 thumbnail is made from a real video frame with the title overlay (requires FFmpeg).
+- Gemini analyzes a representative video frame to draft SEO metadata and generate an AI thumbnail (Gemini 3.1 Flash Image); a real-frame/title-overlay fallback is used if image generation fails (requires FFmpeg).
 - Videos are stored in a SQLite queue.
 - Google OAuth connects the YouTube channel.
 - `/publish ID` uploads a queued video as **private** and applies the generated thumbnail when available.
@@ -34,7 +34,10 @@ Set these values in `.env`:
 - `MANAGER_API_TOKEN`: separate long random token used by dashboard schedule/live controls; enter the same value in the dashboard.
 - `TELEGRAM_BOT_TOKEN`: token from BotFather.
 - `OWNER_TELEGRAM_ID`: your numeric Telegram user ID; only this account can submit and publish videos.
-- `GEMINI_API_KEY`: Google AI Studio key (optional; without it the bot uses a filename-based fallback).
+- `GEMINI_API_KEY`: Google AI Studio key (required for AI metadata and AI thumbnail generation; without it the bot uses a filename-based fallback).
+- `GEMINI_IMAGE_MODEL`: image model, default `gemini-3.1-flash-image`.
+- `AUTO_UPLOAD_DEFAULT=true`: automatically publish each Telegram video after AI processing.
+- `AUTO_UPLOAD_PRIVACY=public`: default visibility (`public`, `unlisted`, or `private`). Owner can change it with `/privacy`.
 - `APP_SECRET`: long random secret.
 - `MANAGER_API_TOKEN`: separate long random token for dashboard write controls.
 - `DASHBOARD_PASSWORD`: strong password for the dashboard's HTTP Basic Auth login.
@@ -55,7 +58,9 @@ The `/publish ID` command intentionally uploads as **private**. `/schedule` uplo
 
 - `/start` — instructions
 - `/queue` — latest queued videos
-- `/publish ID` — upload a queued video privately for review, for example `/publish 3`.
+- `/publish ID` — manually upload a queued video privately for review, for example `/publish 3`.
+- `/autopublish on|off` — enable or pause automatic publishing after Telegram video intake.
+- `/privacy public|unlisted|private` — choose the default visibility for automatic uploads.
 - `/schedule ID YYYY-MM-DD HH:MM` — upload privately and set YouTube's scheduled public release time in `TIMEZONE` (default: `Asia/Kolkata`). Example: `/schedule 3 2026-11-20 19:30`.
 - Dashboard owner controls — schedule uploads, schedule/start/stop a recorded live stream, check live status, and enable/disable automatic comment replies.
 - Send a video file — add it to the queue and generate metadata.
