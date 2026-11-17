@@ -393,7 +393,32 @@ def dashboard():
     a{{color:#60a5fa}}</style></head><body><main><h1>🎬 YouTube AI Manager</h1>
     <p>Telegram video intake · AI metadata · Scheduled publishing · Automatic comment replies</p><p><a href='/oauth/start'>Connect YouTube channel</a> · <a href='/api/queue'>Queue JSON</a></p>
     <section><h2>Automation settings</h2><label><input id='autoReply' type='checkbox' {'checked' if get_setting("auto_reply_enabled", os.getenv("AUTO_REPLY_ENABLED","true")).lower()=="true" else ''}> Automatic comment replies</label><button onclick='saveSettings()'>Save settings</button><p id='saveStatus'></p></section>
-    <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section><script>async function saveSettings(){{const enabled=document.getElementById('autoReply').checked;const r=await fetch('/api/settings',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{auto_reply_enabled:enabled}})}});document.getElementById('saveStatus').textContent=r.ok?'Settings saved':'Save failed';}}</script></main></body></html>"""
+    <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section>
+    <section><h2>Owner controls</h2>
+    <label>Manager API token <input id='managerToken' type='password' placeholder='Set MANAGER_API_TOKEN in .env'></label>
+    <p><label>Video queue ID <input id='videoId' type='number' min='1'></label></p>
+    <p><label>Publish date/time (India) <input id='publishAt' type='datetime-local'></label>
+    <button onclick='scheduleVideo()'>Schedule upload</button></p>
+    <p><label>Live title <input id='liveTitle' placeholder='Live stream title'></label>
+    <select id='livePrivacy'><option>private</option><option>unlisted</option><option>public</option></select>
+    <label><input id='liveLoop' type='checkbox' checked> Loop recorded video continuously</label>
+    <button onclick='startLive()'>Start recorded live</button>
+    <button onclick='stopLive()'>Stop live</button>
+    <button onclick='liveStatus()'>Live status</button></p><pre id='controlStatus'>Ready</pre></section>
+    <script>
+    async function managerApi(path,body){{const token=document.getElementById('managerToken').value;
+      const options={{method:body?'POST':'GET',headers:{{'X-Manager-Token':token,'Content-Type':'application/json'}}}};
+      if(body)options.body=JSON.stringify(body);const r=await fetch(path,options);const d=await r.json();
+      document.getElementById('controlStatus').textContent=JSON.stringify(d,null,2);if(!r.ok)throw Error(d.error||'Request failed');return d;}}
+    function videoId(){{return Number(document.getElementById('videoId').value);}}
+    async function scheduleVideo(){{try{{const t=document.getElementById('publishAt').value;if(!videoId()||!t)throw Error('Video ID and time required');
+      await managerApi('/api/schedule',{{video_id:videoId(),publish_at:t.replace('T',' ')}});}}catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
+    async function startLive(){{try{{if(!videoId())throw Error('Video ID required');await managerApi('/api/live/start',{{video_id:videoId(),
+      title:document.getElementById('liveTitle').value,privacy:document.getElementById('livePrivacy').value,loop:document.getElementById('liveLoop').checked}});}}
+      catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
+    async function stopLive(){{try{{await managerApi('/api/live/stop',{{}});}}catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
+    async function liveStatus(){{try{{await managerApi('/api/live/status');}}catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
+    async function saveSettings(){{const enabled=document.getElementById('autoReply').checked;const r=await fetch('/api/settings',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{auto_reply_enabled:enabled}})}});document.getElementById('saveStatus').textContent=r.ok?'Settings saved':'Save failed';}}</script></main></body></html>"""
 
 
 @app.get("/api/queue")
