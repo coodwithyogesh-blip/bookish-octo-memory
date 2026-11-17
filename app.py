@@ -374,9 +374,9 @@ def telegram_loop():
                 elif text.startswith("/queue") and owner_allowed(message.get("from", {}).get("id")):
                     with db() as con:
                         rows = con.execute("SELECT id,title,status FROM videos ORDER BY id DESC LIMIT 10").fetchall()
-                    send_message(chat_id, "\\n".join([f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]) or "Queue empty.")
+                    send_message(chat_id, "\n".join([f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]) or "Queue empty.")
                 elif text.startswith("/schedule") and owner_allowed(message.get("from", {}).get("id")):
-                    match = re.search(r"/schedule\\s+(\\d+)\\s+(\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2})", text)
+                    match = re.search(r"/schedule\s+(\d+)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", text)
                     if not match:
                         send_message(chat_id, "Use: /schedule 1 2026-11-20 19:30 (India time)")
                     else:
@@ -387,13 +387,13 @@ def telegram_loop():
                             log.exception("Schedule upload failed")
                             send_message(chat_id, f"Schedule failed: {exc}")
                 elif text.startswith("/publish") and owner_allowed(message.get("from", {}).get("id")):
-                    match = re.search(r"/publish\\s+(\\d+)", text)
+                    match = re.search(r"/publish\s+(\d+)", text)
                     if not match:
                         send_message(chat_id, "Use: /publish 1")
                     else:
                         try:
                             yt_id = upload_video(int(match.group(1)), "private")
-                            send_message(chat_id, f"✅ YouTube par private upload complete: https://youtu.be/{yt_id}\\nPublic karne ke liye YouTube Studio mein review karo.")
+                            send_message(chat_id, f"✅ YouTube par private upload complete: https://youtu.be/{yt_id}\nPublic karne ke liye YouTube Studio mein review karo.")
                         except Exception as exc:
                             log.exception("Upload failed")
                             send_message(chat_id, f"Upload failed: {exc}")
