@@ -236,6 +236,8 @@ def poll_comment_replies():
     service = youtube_service()
     with db() as con:
         videos = con.execute("SELECT youtube_video_id FROM videos WHERE youtube_video_id IS NOT NULL AND status IN ('uploaded','scheduled')").fetchall()
+    mine = service.channels().list(part="id", mine=True).execute()
+    my_channel_id = (mine.get("items") or [{}])[0].get("id", "")
     for video in videos:
         try:
             result = service.commentThreads().list(part="snippet", videoId=video["youtube_video_id"],
@@ -243,7 +245,13 @@ def poll_comment_replies():
             for thread in result.get("items", []):
                 top = thread["snippet"]["topLevelComment"]
                 comment_id = top["id"]
-                comment = top["snippet"].get("textDisplay", "")
+                comment = top["snippet"].get("textOriginal", top["snippet"].get("textDisplay", ""))
+                author_id = top["snippet"].get("authorChannelId", {}).get("value", "")
+                if author_id and author_id == my_channel_id:
+                    with db() as con:
+                        con.execute("INSERT OR IGNORE INTO processed_comments VALUES (?,?)",
+                                    (comment_id, datetime.now(timezone.utc).isoformat()))
+                    continue
                 with db() as con:
                     done = con.execute("SELECT 1 FROM processed_comments WHERE comment_id=?", (comment_id,)).fetchone()
                 if done:
