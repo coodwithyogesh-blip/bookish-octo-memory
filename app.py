@@ -604,6 +604,10 @@ def process_telegram_update(update):
     elif text.startswith("/team") and message_authorized(message):
         send_message(chat_id, "Authorized team IDs: " + (", ".join(team_user_ids()) or "No team members yet."))
     elif text.startswith("/comments") and message_authorized(message):
+        try:
+            poll_comment_replies()
+        except Exception:
+            log.exception("On-demand YouTube comment refresh failed")
         with db() as con:
             rows = con.execute("SELECT comment_id,video_title,author,comment_text FROM comment_queue WHERE status='pending' ORDER BY created_at DESC LIMIT 10").fetchall()
         if not rows:
@@ -882,6 +886,11 @@ def queue_api():
 def comments_api():
     if not manager_api_authorized():
         return jsonify({"error": "Unauthorized"}), 401
+    if request.args.get("refresh", "true").lower() == "true":
+        try:
+            poll_comment_replies()
+        except Exception:
+            log.exception("Dashboard on-demand comment refresh failed")
     status = request.args.get("status", "pending")
     if status not in ("pending", "replied", "skipped", "deleted", "all"):
         return jsonify({"error": "Invalid status"}), 400
