@@ -532,7 +532,7 @@ def telegram_loop():
                     else:
                         with db() as con:
                             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('telegram_group_id',?)", (str(chat_id),))
-                        send_message(chat_id, f"✅ Ye group YouTube Studio group se connect ho gaya.\nGroup ID: {chat_id}\\nAb /allow USER_ID se team add karo.")
+                        send_message(chat_id, f"✅ Ye group YouTube Studio group se connect ho gaya.\nGroup ID: {chat_id}\nAb /allow USER_ID se team add karo.")
                 elif text.startswith("/allow") and owner_group_command(message):
                     match = re.search(r"/allow(?:@\w+)?\s+(-?\d+)", text)
                     if not match:
@@ -564,7 +564,7 @@ def telegram_loop():
                         "resize_keyboard": True,
                         "is_persistent": True,
                     }
-                    send_message(chat_id, "🎬 YouTube AI Studio\n\nVideo bhejo → apna thumbnail reply karo → AI metadata ke saath auto upload.\\n\\nOwner: /bindgroup, /allow ID, /revoke ID.\\nTeam: /upload, /queue, /thumbnail ID, /publish ID, /schedule ID YYYY-MM-DD HH:MM.", reply_markup=keyboard)
+                    send_message(chat_id, "🎬 YouTube AI Studio\n\nVideo bhejo → apna thumbnail reply karo → AI metadata ke saath auto upload.\n\nOwner: /bindgroup, /allow ID, /revoke ID.\nTeam: /upload, /queue, /thumbnail ID, /publish ID, /schedule ID YYYY-MM-DD HH:MM.", reply_markup=keyboard)
                 elif text.startswith("/help") and message_authorized(message):
                     send_message(chat_id, "Commands: /upload, /queue, /thumbnail ID, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM, /team. Owner-only: /bindgroup, /allow ID, /revoke ID.")
                 elif text.startswith("/upload") and message_authorized(message):
