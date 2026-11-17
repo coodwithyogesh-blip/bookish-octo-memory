@@ -15,6 +15,7 @@ SCHEMA = (
         scheduled_at TEXT, created_at TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS processed_telegram_updates (update_id BIGINT PRIMARY KEY, created_at TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS processed_comments (comment_id TEXT PRIMARY KEY, replied_at TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS comment_queue (
         comment_id TEXT PRIMARY KEY, video_id TEXT NOT NULL, video_title TEXT, author TEXT,
