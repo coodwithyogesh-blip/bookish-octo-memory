@@ -501,6 +501,11 @@ def oauth_callback():
     secrets = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "client_secret.json")
     flow = Flow.from_client_secrets_file(secrets, scopes=SCOPES, state=app.config.get("oauth_state"),
                                          redirect_uri=request.url_root.rstrip("/") + "/oauth/callback")
+    # OAuth permits plain HTTP only for local development callbacks.
+    # Never enable insecure OAuth transport for public/hosted domains.
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if request.scheme == "http" and request.host.split(":")[0].strip("[]") in local_hosts:
+        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
     flow.fetch_token(authorization_response=request.url)
     Path(os.getenv("YOUTUBE_TOKEN_FILE", "token.json")).write_text(flow.credentials.to_json(), encoding="utf-8")
     return "YouTube channel connected. You can close this page and send a video to your Telegram bot."
