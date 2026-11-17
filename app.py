@@ -20,7 +20,8 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-import sqlite3
+from database import db, init_db
+from cloud_storage import configured as storage_configured, persist as persist_file, materialize as materialize_file
 
 from metadata import build_youtube_snippet, clean_metadata, parse_json_response
 from comment_manager import parse_reply_command, parse_comment_action, comment_notification
@@ -33,7 +34,6 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s | 
 log = logging.getLogger("youtube-ai-manager")
 app = Flask(__name__)
 app.secret_key = os.getenv("APP_SECRET", "change-me-before-deploy")
-DB = os.getenv("DATABASE_PATH", "manager.db")
 MEDIA = Path(os.getenv("MEDIA_DIR", "media"))
 MEDIA.mkdir(parents=True, exist_ok=True)
 SCOPES = [
@@ -42,70 +42,6 @@ SCOPES = [
 ]
 stop_event = threading.Event()
 live_manager = RecordedLiveManager()
-
-
-def db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    with db() as con:
-        con.execute("""CREATE TABLE IF NOT EXISTS videos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_file_id TEXT UNIQUE,
-            file_path TEXT NOT NULL,
-            original_name TEXT,
-            title TEXT,
-            description TEXT,
-            tags TEXT,
-            hashtags TEXT,
-            thumbnail_path TEXT,
-            status TEXT NOT NULL DEFAULT 'queued',
-            youtube_video_id TEXT,
-            scheduled_at TEXT,
-            created_at TEXT NOT NULL
-        )""")
-        columns = {row["name"] for row in con.execute("PRAGMA table_info(videos)").fetchall()}
-        if "scheduled_at" not in columns:
-            con.execute("ALTER TABLE videos ADD COLUMN scheduled_at TEXT")
-        con.execute("""CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY, value TEXT NOT NULL
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
-            comment_id TEXT PRIMARY KEY, replied_at TEXT NOT NULL
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS comment_queue (
-            comment_id TEXT PRIMARY KEY,
-            video_id TEXT NOT NULL,
-            video_title TEXT,
-            author TEXT,
-            comment_text TEXT NOT NULL,
-            suggested_reply TEXT,
-            reply_text TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            replied_at TEXT
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS pending_thumbnails (
-            prompt_message_id INTEGER PRIMARY KEY,
-            chat_id TEXT NOT NULL,
-            video_id INTEGER NOT NULL,
-            created_at TEXT NOT NULL
-        )""")
-        con.execute("""CREATE TABLE IF NOT EXISTS scheduled_lives (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            video_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            privacy TEXT NOT NULL,
-            loop INTEGER NOT NULL,
-            scheduled_at TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'scheduled',
-            broadcast_id TEXT,
-            created_at TEXT NOT NULL
-        )""")
-        con.execute("UPDATE scheduled_lives SET status='scheduled' WHERE status='starting'")
 
 
 @app.before_request
@@ -283,14 +219,31 @@ def make_thumbnail(video_path, title, output_path):
         frame.unlink(missing_ok=True)
 
 
+def token_path():
+    return Path(os.getenv("YOUTUBE_TOKEN_FILE", str(MEDIA / "token.json")))
+
+
+def restore_youtube_token():
+    path = token_path()
+    if not path.exists() and storage_configured():
+        materialize_file("supabase://" + os.getenv("SUPABASE_STORAGE_BUCKET", "youtube-media") + "/oauth/token.json", path)
+    return path
+
+
+def save_youtube_token(credentials):
+    path = token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(credentials.to_json(), encoding="utf-8")
+    if storage_configured():
+        persist_file(path, "oauth/token.json")
+
+
 def youtube_service():
-    token_file = os.getenv("YOUTUBE_TOKEN_FILE", "token.json")
-    creds = None
-    if Path(token_file).exists():
-        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+    path = restore_youtube_token()
+    creds = Credentials.from_authorized_user_file(str(path), SCOPES) if path.exists() else None
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(GoogleRequest())
-        Path(token_file).write_text(creds.to_json(), encoding="utf-8")
+        save_youtube_token(creds)
     if not creds or not creds.valid:
         raise RuntimeError("YouTube not connected. Open /oauth/start first.")
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
@@ -314,7 +267,8 @@ def upload_video(video_id, privacy="private", publish_at=None):
         "hashtags": json.loads(row["hashtags"] or "[]"),
     })
     body = {"snippet": snippet, "status": status}
-    media = MediaFileUpload(row["file_path"], chunksize=-1, resumable=True)
+    video_local = materialize_file(row["file_path"], MEDIA / f"publish_{video_id}.mp4")
+    media = MediaFileUpload(video_local, chunksize=-1, resumable=True)
     result = service.videos().insert(part="snippet,status", body=body, media_body=media).execute()
     yt_id = result["id"]
     with db() as con:
@@ -322,9 +276,10 @@ def upload_video(video_id, privacy="private", publish_at=None):
         con.execute("UPDATE videos SET status=?, youtube_video_id=?, scheduled_at=? WHERE id=?",
                     (final_status, yt_id, publish_at.isoformat() if publish_at else None, video_id))
     thumb = row["thumbnail_path"]
-    if thumb and Path(thumb).exists():
+    if thumb:
         try:
-            service.thumbnails().set(videoId=yt_id, media_body=MediaFileUpload(thumb)).execute()
+            thumb_local = materialize_file(thumb, MEDIA / f"publish_thumb_{video_id}.jpg")
+            service.thumbnails().set(videoId=yt_id, media_body=MediaFileUpload(thumb_local)).execute()
         except Exception:
             # Do not retry the whole video upload if YouTube temporarily rejects the thumbnail.
             log.exception("Video uploaded, but custom thumbnail could not be applied yet")
@@ -516,11 +471,13 @@ def handle_video(message):
                     out.write(chunk)
     name = message.get("caption") or Path(info["file_path"]).name
     metadata = gemini_metadata(target, name)
+    safe_file_id = re.sub(r"[^A-Za-z0-9_-]", "_", file_id)
+    remote_video = persist_file(target, f"videos/{safe_file_id}{suffix}") if storage_configured() else str(target)
     with db() as con:
         cur = con.execute("""INSERT INTO videos
             (telegram_file_id,file_path,original_name,title,description,tags,hashtags,thumbnail_path,status,created_at)
             VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (file_id,str(target),name,metadata["title"],metadata["description"],json.dumps(metadata["tags"]),
+            (file_id,remote_video,name,metadata["title"],metadata["description"],json.dumps(metadata["tags"]),
              json.dumps(metadata["hashtags"]),None,"awaiting_thumbnail",datetime.now(timezone.utc).isoformat()))
         item_id = cur.lastrowid
     prompt = send_message(
@@ -569,15 +526,17 @@ def handle_thumbnail(message):
             ImageOps.fit(source.convert("RGB"), (1280, 720), method=Image.Resampling.LANCZOS).save(thumb_path, "JPEG", quality=94)
     finally:
         raw.unlink(missing_ok=True)
+    remote_thumb = persist_file(thumb_path, f"thumbnails/video_{pending['video_id']}.jpg") if storage_configured() else str(thumb_path)
     with db() as con:
         con.execute("UPDATE videos SET thumbnail_path=?, status=CASE WHEN youtube_video_id IS NULL THEN 'queued' ELSE status END WHERE id=?",
-                    (str(thumb_path), pending["video_id"]))
+                    (remote_thumb, pending["video_id"]))
         con.execute("DELETE FROM pending_thumbnails WHERE prompt_message_id=?", (prompt_id,))
         saved_video = con.execute("SELECT youtube_video_id FROM videos WHERE id=?", (pending["video_id"],)).fetchone()
     if saved_video and saved_video["youtube_video_id"]:
+        thumb_local = materialize_file(remote_thumb, MEDIA / f"existing_thumb_{pending['video_id']}.jpg")
         youtube_service().thumbnails().set(
             videoId=saved_video["youtube_video_id"],
-            media_body=MediaFileUpload(str(thumb_path))
+            media_body=MediaFileUpload(thumb_local)
         ).execute()
         send_message(chat_id, f"✅ Existing YouTube video #{pending['video_id']} ka thumbnail update ho gaya.")
         return
@@ -997,7 +956,7 @@ def oauth_callback():
     external_base = os.getenv("RENDER_EXTERNAL_URL", request.url_root).rstrip("/")
     callback_url = external_base + request.full_path
     flow.fetch_token(authorization_response=callback_url)
-    Path(os.getenv("YOUTUBE_TOKEN_FILE", "token.json")).write_text(flow.credentials.to_json(), encoding="utf-8")
+    save_youtube_token(flow.credentials)
     return "YouTube channel connected. You can close this page and send a video to your Telegram bot."
 
 
@@ -1043,8 +1002,9 @@ def live_schedule_api():
             raise ValueError("Invalid live privacy setting")
         with db() as con:
             row = con.execute("SELECT file_path FROM videos WHERE id=?", (video_id,)).fetchone()
-            if not row or not Path(row["file_path"]).is_file():
-                return jsonify({"error": "Video queue item or its file was not found"}), 404
+        if not row:
+            return jsonify({"error": "Video queue item was not found"}), 404
+        live_video_path = materialize_file(row["file_path"], MEDIA / f"live_{video_id}.mp4")
         scheduled = parse_schedule(str(payload.get("scheduled_at", "")), os.getenv("TIMEZONE", "Asia/Kolkata"))
         with db() as con:
             cur = con.execute(
@@ -1072,9 +1032,10 @@ def process_scheduled_lives():
         con.execute("UPDATE scheduled_lives SET status='starting' WHERE id=?", (job["id"],))
         video = con.execute("SELECT file_path FROM videos WHERE id=?", (job["video_id"],)).fetchone()
     try:
-        if not video or not Path(video["file_path"]).is_file():
+        if not video:
             raise FileNotFoundError("Scheduled live video file is missing")
-        result = live_manager.start(youtube_service(), video["file_path"], job["title"],
+        live_video_path = materialize_file(video["file_path"], MEDIA / f"scheduled_live_{job['video_id']}.mp4")
+        result = live_manager.start(youtube_service(), live_video_path, job["title"],
                                     privacy=job["privacy"], loop=bool(job["loop"]))
         with db() as con:
             con.execute("UPDATE scheduled_lives SET status='running',broadcast_id=? WHERE id=?",
@@ -1096,8 +1057,9 @@ def live_start_api():
             row = con.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
         if not row:
             return jsonify({"error": "Video queue ID not found"}), 404
+        live_video_path = materialize_file(row["file_path"], MEDIA / f"live_{video_id}.mp4")
         result = live_manager.start(
-            youtube_service(), row["file_path"], payload.get("title") or row["title"] or "Live stream",
+            youtube_service(), live_video_path, payload.get("title") or row["title"] or "Live stream",
             privacy=payload.get("privacy", "private"),
             loop=bool(payload.get("loop", True)),
         )
