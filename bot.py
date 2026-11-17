@@ -6,7 +6,6 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -20,7 +19,6 @@ log = logging.getLogger("youtube-telegram")
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 YT = "{http://www.youtube.com/xml/schemas/2015}"
-MEDIA = "{http://search.yahoo.com/mrss/}"
 STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Mozilla/5.0 (compatible; YouTubeTelegramNotifier/1.0)"})
