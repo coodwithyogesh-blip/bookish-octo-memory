@@ -48,9 +48,9 @@ Dashboard URL: `https://YOUR-RENDER-SERVICE.onrender.com/`. Set Google OAuth's a
 
 1. In Google Cloud Console, create/select a project and enable **YouTube Data API v3**.
 2. Configure the OAuth consent screen and add your Google account as a test user if the app is in testing.
-3. Create an OAuth client. For local use, configure the callback as `http://127.0.0.1:10000/oauth/callback`. For hosting, configure the exact HTTPS callback URL shown by your deployed app: `https://YOUR-HOST/oauth/callback`.
+3. Create a Web application OAuth client and configure the authorized redirect URI as `https://YOUR-RENDER-SERVICE.onrender.com/oauth/callback`.
 4. Download the client JSON as `client_secret.json` and keep it private.
-5. Open `/oauth/start` in the browser and authorize the YouTube channel.
+5. Open your deployed Render dashboard, select **Connect YouTube channel**, and authorize the channel.
 
 The `/publish ID` command intentionally uploads as **private**. `/schedule` uploads privately with YouTube's scheduled release time. The upload is blocked until a custom thumbnail is attached. Scheduled uploads use YouTube's publishAt feature; the video is uploaded privately when the schedule is created and becomes public at the requested time.
 
@@ -81,11 +81,7 @@ Send a video as a Telegram video or as a document with a video MIME type. Add a 
 4. Ask each teammate to send `/whoami`; copy their numeric ID and run `/allow ID` as the owner.
 5. Send a video, then reply to the bot's thumbnail prompt with your own image. The bot uses that exact image for the upload.
 
-The bot only accepts commands and media from the bound group and owner-approved IDs. Keep group membership controlled. The hosted Telegram Bot API file download currently limits downloads to 20 MB; larger source videos need a local Telegram Bot API server or a different upload intake path.
-
-## Deploying
-
-Use a persistent disk for `manager.db`, `media/`, and `token.json`. A normal ephemeral web filesystem can lose queued videos and OAuth tokens after restart. Set the service start command to `python app.py`, configure all environment variables, and set the Google OAuth callback URL to the public HTTPS URL.
+The bot only accepts commands and media from the bound group and owner-approved IDs. Keep group membership controlled. Telegram's hosted Bot API download is limited to 20 MB per file. Files above that limit are not supported by this Telegram-download path; a future Render-hosted browser upload path would be needed for larger source videos.
 
 ## YouTube comment management
 
