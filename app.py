@@ -6,6 +6,8 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
+from apscheduler.schedulers.background import BackgroundScheduler
+from automation import parse_schedule, comment_is_suitable
 from pathlib import Path
 
 import requests
@@ -56,10 +58,17 @@ def init_db():
             thumbnail_path TEXT,
             status TEXT NOT NULL DEFAULT 'queued',
             youtube_video_id TEXT,
+            scheduled_at TEXT,
             created_at TEXT NOT NULL
         )""")
+        columns = {row["name"] for row in con.execute("PRAGMA table_info(videos)").fetchall()}
+        if "scheduled_at" not in columns:
+            con.execute("ALTER TABLE videos ADD COLUMN scheduled_at TEXT")
         con.execute("""CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
+            comment_id TEXT PRIMARY KEY, replied_at TEXT NOT NULL
         )""")
 
 
@@ -149,12 +158,15 @@ def youtube_service():
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
 
 
-def upload_video(video_id, privacy="private"):
+def upload_video(video_id, privacy="private", publish_at=None):
     with db() as con:
         row = con.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
     if not row:
         raise ValueError("Video queue ID not found")
     service = youtube_service()
+    status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": False}
+    if publish_at:
+        status["publishAt"] = publish_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     body = {
         "snippet": {
             "title": row["title"][:100],
@@ -162,7 +174,7 @@ def upload_video(video_id, privacy="private"):
             "tags": json.loads(row["tags"] or "[]"),
             "categoryId": "22",
         },
-        "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
+        "status": status,
     }
     media = MediaFileUpload(row["file_path"], chunksize=-1, resumable=True)
     result = service.videos().insert(part="snippet,status", body=body, media_body=media).execute()
@@ -171,9 +183,71 @@ def upload_video(video_id, privacy="private"):
     if thumb and Path(thumb).exists():
         service.thumbnails().set(videoId=yt_id, media_body=MediaFileUpload(thumb)).execute()
     with db() as con:
-        con.execute("UPDATE videos SET status='uploaded', youtube_video_id=? WHERE id=?", (yt_id, video_id))
+        final_status = "scheduled" if publish_at else "uploaded"
+        con.execute("UPDATE videos SET status=?, youtube_video_id=?, scheduled_at=? WHERE id=?",
+                    (final_status, yt_id, publish_at.isoformat() if publish_at else None, video_id))
     return yt_id
 
+
+
+def generate_comment_reply(comment_text):
+    if not comment_is_suitable(comment_text):
+        return None
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        return "Thank you for watching! 😊"
+    model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    prompt = ("Write one short, friendly creator reply in the same language as this YouTube comment. "
+              "Do not give medical, legal, financial or safety advice. Do not ask for personal data. "
+              "If the comment needs a sensitive answer, return exactly SKIP. Comment: " + comment_text[:1000])
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    response = requests.post(url, json={"contents":[{"parts":[{"text":prompt}]}]}, timeout=45)
+    response.raise_for_status()
+    answer = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    if answer.upper() == "SKIP" or not answer or len(answer) > 500:
+        return None
+    return answer
+
+
+def poll_comment_replies():
+    if os.getenv("AUTO_REPLY_ENABLED", "true").lower() != "true":
+        return
+    service = youtube_service()
+    with db() as con:
+        videos = con.execute("SELECT youtube_video_id FROM videos WHERE youtube_video_id IS NOT NULL AND status IN ('uploaded','scheduled')").fetchall()
+    for video in videos:
+        try:
+            result = service.commentThreads().list(part="snippet", videoId=video["youtube_video_id"],
+                                                   maxResults=20, order="time").execute()
+            for thread in result.get("items", []):
+                top = thread["snippet"]["topLevelComment"]
+                comment_id = top["id"]
+                comment = top["snippet"].get("textDisplay", "")
+                with db() as con:
+                    done = con.execute("SELECT 1 FROM processed_comments WHERE comment_id=?", (comment_id,)).fetchone()
+                if done:
+                    continue
+                if not comment_is_suitable(comment):
+                    with db() as con:
+                        con.execute("INSERT OR IGNORE INTO processed_comments VALUES (?,?)",
+                                    (comment_id, datetime.now(timezone.utc).isoformat()))
+                    continue
+                reply = generate_comment_reply(comment)
+                if not reply:
+                    continue
+                service.comments().insert(part="snippet", body={"snippet":{"parentId":comment_id,
+                                                                           "textOriginal":reply}}).execute()
+                with db() as con:
+                    con.execute("INSERT OR IGNORE INTO processed_comments VALUES (?,?)",
+                                (comment_id, datetime.now(timezone.utc).isoformat()))
+        except Exception:
+            log.exception("Comment reply check failed for video %s", video["youtube_video_id"])
+
+
+def schedule_video_upload(video_id, local_time):
+    scheduled = parse_schedule(local_time, os.getenv("TIMEZONE", "Asia/Kolkata"))
+    yt_id = upload_video(video_id, "private", scheduled)
+    return yt_id, scheduled
 
 def handle_video(message):
     user = message.get("from", {})
@@ -234,11 +308,22 @@ def telegram_loop():
                 text = (message.get("text") or "").strip()
                 chat_id = message.get("chat", {}).get("id")
                 if text.startswith("/start"):
-                    send_message(chat_id, "YouTube AI Manager ready. Video bhejo. Commands: /queue, /publish ID")
+                    send_message(chat_id, "YouTube AI Manager ready. Video bhejo. Commands: /queue, /publish ID, /schedule ID YYYY-MM-DD HH:MM")
                 elif text.startswith("/queue") and owner_allowed(message.get("from", {}).get("id")):
                     with db() as con:
                         rows = con.execute("SELECT id,title,status FROM videos ORDER BY id DESC LIMIT 10").fetchall()
                     send_message(chat_id, "\n".join([f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]) or "Queue empty.")
+                elif text.startswith("/schedule") and owner_allowed(message.get("from", {}).get("id")):
+                    match = re.search(r"/schedule\s+(\d+)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", text)
+                    if not match:
+                        send_message(chat_id, "Use: /schedule 1 2026-11-20 19:30 (India time)")
+                    else:
+                        try:
+                            yt_id, scheduled = schedule_video_upload(int(match.group(1)), match.group(2))
+                            send_message(chat_id, f"Scheduled: {scheduled.strftime('%d-%m-%Y %I:%M %p')} UTC. Video: https://youtu.be/{yt_id}")
+                        except Exception as exc:
+                            log.exception("Schedule upload failed")
+                            send_message(chat_id, f"Schedule failed: {exc}")
                 elif text.startswith("/publish") and owner_allowed(message.get("from", {}).get("id")):
                     match = re.search(r"/publish\s+(\d+)", text)
                     if not match:
@@ -274,7 +359,7 @@ def dashboard():
     main{{max-width:900px;margin:auto}}section{{background:#1d293b;padding:16px;border-radius:14px}}
     table{{width:100%;border-collapse:collapse}}td,th{{padding:10px;border-bottom:1px solid #39465b;text-align:left}}
     a{{color:#60a5fa}}</style></head><body><main><h1>🎬 YouTube AI Manager</h1>
-    <p>Telegram video intake · AI metadata · YouTube upload queue</p><p><a href='/oauth/start'>Connect YouTube channel</a> · <a href='/api/queue'>Queue JSON</a></p>
+    <p>Telegram video intake · AI metadata · Scheduled publishing · Automatic comment replies</p><p><a href='/oauth/start'>Connect YouTube channel</a> · <a href='/api/queue'>Queue JSON</a></p>
     <section><h2>Recent videos</h2><table><tr><th>ID</th><th>Title</th><th>Status</th><th>YouTube ID</th></tr>{items}</table></section></main></body></html>"""
 
 
@@ -310,6 +395,10 @@ def main():
     init_db()
     if os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
         threading.Thread(target=telegram_loop, daemon=True, name="telegram-poller").start()
+    scheduler = BackgroundScheduler(timezone="UTC")
+    scheduler.add_job(poll_comment_replies, "interval", minutes=2, id="comment-replies",
+                      max_instances=1, coalesce=True)
+    scheduler.start()
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
