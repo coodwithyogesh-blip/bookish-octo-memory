@@ -26,21 +26,19 @@ SESSION.headers.update({"User-Agent": "Mozilla/5.0 (compatible; YouTubeTelegramN
 
 def parse_channel_id(page_html):
     """Extract the stable UC... channel ID from a YouTube channel page."""
-    for tag in re.findall(r'<meta\\b[^>]*>', page_html):
-        if re.search(r'\\bitemprop=["\\']channelId["\\']', tag):
-            match = re.search(r'\\bcontent=["\\'](UC[\\w-]+)', tag)
+    for tag in re.findall(r'<meta\b[^>]*>', page_html):
+        if re.search(r'\bitemprop=["\']channelId["\']', tag):
+            match = re.search(r'\bcontent=["\'](UC[\w-]+)', tag)
             if match:
                 return match.group(1)
     for pattern in (
-        r'"externalId"\\s*:\\s*"(UC[\\w-]+)"',
-        r'"channelId"\\s*:\\s*"(UC[\\w-]+)"',
+        r'"externalId"\s*:\s*"(UC[\w-]+)"',
+        r'"channelId"\s*:\s*"(UC[\w-]+)"',
     ):
         match = re.search(pattern, page_html)
         if match:
             return match.group(1)
     raise ValueError("Channel ID nahi mila. YOUTUBE_CHANNEL handle/URL check karo.")
-
-
 def channel_page_url(channel):
     channel = channel.strip()
     if channel.startswith("http://") or channel.startswith("https://"):
