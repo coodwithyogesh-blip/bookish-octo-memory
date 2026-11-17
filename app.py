@@ -19,10 +19,11 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import sqlite3
 
 from metadata import build_youtube_snippet, clean_metadata, parse_json_response
+from telegram_groups import is_authorized_user, is_allowed_group, parse_telegram_id
 from livestream import RecordedLiveManager
 import hmac
 
@@ -74,6 +75,12 @@ def init_db():
         con.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
             comment_id TEXT PRIMARY KEY, replied_at TEXT NOT NULL
         )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS pending_thumbnails (
+            prompt_message_id INTEGER PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            video_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )""")
         con.execute("""CREATE TABLE IF NOT EXISTS scheduled_lives (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             video_id INTEGER NOT NULL,
@@ -113,6 +120,35 @@ def owner_allowed(user_id):
     owner = os.getenv("OWNER_TELEGRAM_ID", "").strip()
     return bool(owner) and str(user_id) == owner
 
+def configured_group_id():
+    return get_setting("telegram_group_id", os.getenv("TELEGRAM_GROUP_ID", os.getenv("TELEGRAM_CHAT_ID", "")))
+
+
+def team_user_ids():
+    with db() as con:
+        rows = con.execute("SELECT key FROM settings WHERE key LIKE 'team_user:%' AND value='true'").fetchall()
+    return [row["key"].split(":", 1)[1] for row in rows]
+
+
+def team_allowed(user_id):
+    return is_authorized_user(user_id, os.getenv("OWNER_TELEGRAM_ID", ""), team_user_ids())
+
+
+def message_authorized(message):
+    chat = message.get("chat", {})
+    chat_type = chat.get("type", "")
+    chat_id = str(chat.get("id", ""))
+    user_id = message.get("from", {}).get("id")
+    if chat_type == "private":
+        return owner_allowed(user_id)
+    return (chat_type in ("group", "supergroup")
+            and is_allowed_group(chat_id, configured_group_id())
+            and team_allowed(user_id))
+
+
+def owner_group_command(message):
+    return owner_allowed(message.get("from", {}).get("id"))
+
 
 def telegram_call(method, payload=None):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -126,8 +162,10 @@ def telegram_call(method, payload=None):
     return data["result"]
 
 
-def send_message(chat_id, text):
-    telegram_call("sendMessage", {"chat_id": chat_id, "text": text})
+def send_message(chat_id, text, **extra):
+    payload = {"chat_id": chat_id, "text": text}
+    payload.update(extra)
+    return telegram_call("sendMessage", payload)
 
 
 def gemini_metadata(file_path, filename):
@@ -345,8 +383,8 @@ def schedule_video_upload(video_id, local_time):
 def handle_video(message):
     user = message.get("from", {})
     chat_id = message.get("chat", {}).get("id")
-    if not owner_allowed(user.get("id")):
-        send_message(chat_id, "Sorry, ye bot sirf owner ke liye hai.")
+    if not message_authorized(message):
+        send_message(chat_id, "⛔ Is group ke liye tum authorized nahi ho. Owner se access lo.")
         return
     video = message.get("video") or message.get("document")
     if not video:
@@ -371,28 +409,77 @@ def handle_video(message):
                     out.write(chunk)
     name = message.get("caption") or Path(info["file_path"]).name
     metadata = gemini_metadata(target, name)
-    thumb_path = make_thumbnail(target, metadata["title"], MEDIA / f"thumb_{file_id}.jpg")
     with db() as con:
         cur = con.execute("""INSERT INTO videos
             (telegram_file_id,file_path,original_name,title,description,tags,hashtags,thumbnail_path,status,created_at)
             VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (file_id,str(target),name,metadata["title"],metadata["description"],json.dumps(metadata["tags"]),
-             json.dumps(metadata["hashtags"]),thumb_path,"queued",datetime.now(timezone.utc).isoformat()))
+             json.dumps(metadata["hashtags"]),None,"awaiting_thumbnail",datetime.now(timezone.utc).isoformat()))
         item_id = cur.lastrowid
-    send_message(chat_id, f"✅ Video ready!\nID: {item_id}\\nTitle: {metadata['title']}\\nAI thumbnail: {'ready' if thumb_path else 'fallback unavailable'}")
+    prompt = send_message(
+        chat_id,
+        f"🎬 Video #{item_id} AI analysis ready!\\nTitle: {metadata['title']}\\n\\nAb apna custom thumbnail PHOTO ke roop mein is message ka reply karke bhejo. Thumbnail milte hi bot upload karega.",
+        reply_markup={"force_reply": True, "selective": True},
+    )
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO pending_thumbnails(prompt_message_id,chat_id,video_id,created_at) VALUES(?,?,?,?)",
+                    (prompt["message_id"], str(chat_id), item_id, datetime.now(timezone.utc).isoformat()))
+
+
+
+def handle_thumbnail(message):
+    if not message_authorized(message):
+        return
+    reply = message.get("reply_to_message") or {}
+    prompt_id = reply.get("message_id")
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    with db() as con:
+        pending = con.execute(
+            "SELECT video_id FROM pending_thumbnails WHERE prompt_message_id=? AND chat_id=?",
+            (prompt_id, chat_id)
+        ).fetchone()
+    if not pending:
+        send_message(chat_id, "Thumbnail attach karne ke liye bot ke thumbnail prompt ka reply karo, ya /thumbnail VIDEO_ID use karo.")
+        return
+    photo = message.get("photo") or []
+    document = message.get("document") or {}
+    file_id = photo[-1]["file_id"] if photo else (
+        document.get("file_id") if document.get("mime_type", "").startswith("image/") else None
+    )
+    if not file_id:
+        send_message(chat_id, "Please JPG/PNG image photo ke roop mein bhejo.")
+        return
+    info = telegram_call("getFile", {"file_id": file_id})
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    url = f"https://api.telegram.org/file/bot{token}/{info['file_path']}"
+    response = requests.get(url, timeout=90)
+    response.raise_for_status()
+    raw = MEDIA / f"thumb_upload_{pending['video_id']}_source"
+    raw.write_bytes(response.content)
+    thumb_path = MEDIA / f"thumb_custom_{pending['video_id']}.jpg"
+    try:
+        with Image.open(raw) as source:
+            ImageOps.fit(source.convert("RGB"), (1280, 720), method=Image.Resampling.LANCZOS).save(thumb_path, "JPEG", quality=94)
+    finally:
+        raw.unlink(missing_ok=True)
+    with db() as con:
+        con.execute("UPDATE videos SET thumbnail_path=?, status='queued' WHERE id=?",
+                    (str(thumb_path), pending["video_id"]))
+        con.execute("DELETE FROM pending_thumbnails WHERE prompt_message_id=?", (prompt_id,))
+    send_message(chat_id, f"🖼 Custom thumbnail attached to video #{pending['video_id']}.")
     auto_publish = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "true")).lower() == "true"
     if auto_publish:
         privacy = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "public")).lower()
         if privacy not in ("public", "unlisted", "private"):
             privacy = "public"
         try:
-            yt_id = upload_video(item_id, privacy)
-            send_message(chat_id, f"🚀 Auto upload complete ({privacy})!\nhttps://youtu.be/{yt_id}")
+            yt_id = upload_video(pending["video_id"], privacy)
+            send_message(chat_id, f"🚀 Published ({privacy}) with your thumbnail!\\nhttps://youtu.be/{yt_id}")
         except Exception as exc:
-            log.exception("Automatic YouTube upload failed")
-            send_message(chat_id, f"⚠️ AI processing complete, lekin upload fail hua. Queue ID {item_id}. Error: {exc}\\nYouTube connection/API settings check karo.")
+            log.exception("Auto publish after thumbnail failed")
+            send_message(chat_id, f"⚠️ Thumbnail saved, upload failed. Use /publish {pending['video_id']} after checking YouTube connection.\\n{exc}")
     else:
-        send_message(chat_id, f"Auto upload OFF hai. Publish ke liye /publish {item_id} bhejo.")
+        send_message(chat_id, f"Thumbnail saved. Use /publish {pending['video_id']} when ready.")
 
 
 def telegram_loop():
@@ -431,9 +518,38 @@ def telegram_loop():
                 if not chat_id:
                     continue
 
-                if text.startswith("/start"):
-                    send_message(chat_id, "YouTube AI Manager ready. Video bhejo. Commands: /queue, /autopublish on|off, /privacy public|unlisted|private, /publish ID, /schedule ID YYYY-MM-DD HH:MM")
-                elif text.startswith("/autopublish") and owner_allowed(message.get("from", {}).get("id")):
+                if text.startswith("/whoami"):
+                    send_message(chat_id, f"Your Telegram user ID: {message.get('from', {}).get('id')}")
+                elif text.startswith("/bindgroup") and owner_group_command(message):
+                    if message.get("chat", {}).get("type") not in ("group", "supergroup"):
+                        send_message(chat_id, "Ye command apne Telegram group mein bhejo.")
+                    else:
+                        with db() as con:
+                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('telegram_group_id',?)", (str(chat_id),))
+                        send_message(chat_id, f"✅ Ye group YouTube Studio group se connect ho gaya.\\nGroup ID: {chat_id}\\nAb /allow USER_ID se team add karo.")
+                elif text.startswith("/allow") and owner_group_command(message):
+                    match = re.search(r"/allow\\s+(-?\\d+)", text)
+                    if not match:
+                        send_message(chat_id, "Use: /allow TELEGRAM_USER_ID (user ko pehle /whoami bhejne bolo)")
+                    else:
+                        user_id = parse_telegram_id(match.group(1))
+                        with db() as con:
+                            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?, 'true')", (f"team_user:{user_id}",))
+                        send_message(chat_id, f"✅ Team member {user_id} ko access mil gaya.")
+                elif text.startswith("/revoke") and owner_group_command(message):
+                    match = re.search(r"/revoke\\s+(-?\\d+)", text)
+                    if not match:
+                        send_message(chat_id, "Use: /revoke TELEGRAM_USER_ID")
+                    else:
+                        user_id = parse_telegram_id(match.group(1))
+                        with db() as con:
+                            con.execute("DELETE FROM settings WHERE key=?", (f"team_user:{user_id}",))
+                        send_message(chat_id, f"Access removed for {user_id}.")
+                elif text.startswith("/team") and message_authorized(message):
+                    send_message(chat_id, "Authorized team IDs: " + (", ".join(team_user_ids()) or "No team members yet."))
+                elif text.startswith("/start") and (message_authorized(message) or owner_group_command(message)):
+                    send_message(chat_id, "🎬 YouTube AI Studio ready.\\n/bindgroup (owner) · /whoami · /allow ID · /revoke ID · /team · /upload · /queue · /autopublish on|off · /privacy public|unlisted|private · /thumbnail ID · /publish ID · /schedule ID YYYY-MM-DD HH:MM")
+                elif text.startswith("/autopublish") and message_authorized(message):
                     value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
                     if value not in ("on", "off"):
                         current = get_setting("auto_publish_enabled", os.getenv("AUTO_UPLOAD_DEFAULT", "true"))
@@ -443,7 +559,7 @@ def telegram_loop():
                             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_publish_enabled',?)",
                                         ("true" if value == "on" else "false",))
                         send_message(chat_id, f"Auto publish {value.upper()}.")
-                elif text.startswith("/privacy") and owner_allowed(message.get("from", {}).get("id")):
+                elif text.startswith("/privacy") and message_authorized(message):
                     value = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
                     if value not in ("public", "unlisted", "private"):
                         current = get_setting("upload_privacy", os.getenv("AUTO_UPLOAD_PRIVACY", "public"))
@@ -452,11 +568,26 @@ def telegram_loop():
                         with db() as con:
                             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('upload_privacy',?)", (value,))
                         send_message(chat_id, f"Default upload privacy set to {value}.")
-                elif text.startswith("/queue") and owner_allowed(message.get("from", {}).get("id")):
+                elif text.startswith("/thumbnail") and message_authorized(message):
+                    match = re.search(r"/thumbnail\\s+(\\d+)", text)
+                    if not match:
+                        send_message(chat_id, "Use: /thumbnail VIDEO_ID")
+                    else:
+                        video_id = int(match.group(1))
+                        with db() as con:
+                            row = con.execute("SELECT id FROM videos WHERE id=?", (video_id,)).fetchone()
+                        if not row:
+                            send_message(chat_id, "Video queue ID nahi mila.")
+                        else:
+                            prompt = send_message(chat_id, f"🖼 Video #{video_id} ke liye thumbnail PHOTO is message ka reply karke bhejo.", reply_markup={"force_reply": True, "selective": True})
+                            with db() as con:
+                                con.execute("INSERT OR REPLACE INTO pending_thumbnails(prompt_message_id,chat_id,video_id,created_at) VALUES(?,?,?,?)",
+                                            (prompt["message_id"], str(chat_id), video_id, datetime.now(timezone.utc).isoformat()))
+                elif text.startswith("/queue") and message_authorized(message):
                     with db() as con:
                         rows = con.execute("SELECT id,title,status FROM videos ORDER BY id DESC LIMIT 10").fetchall()
                     send_message(chat_id, "\n".join([f"#{r['id']} [{r['status']}] {r['title']}" for r in rows]) or "Queue empty.")
-                elif text.startswith("/schedule") and owner_allowed(message.get("from", {}).get("id")):
+                elif text.startswith("/schedule") and message_authorized(message):
                     match = re.search(r"/schedule\s+(\d+)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", text)
                     if not match:
                         send_message(chat_id, "Use: /schedule 1 2026-11-20 19:30 (India time)")
@@ -467,7 +598,7 @@ def telegram_loop():
                         except Exception as exc:
                             log.exception("Schedule upload failed")
                             send_message(chat_id, f"Schedule failed: {exc}")
-                elif text.startswith("/publish") and owner_allowed(message.get("from", {}).get("id")):
+                elif text.startswith("/publish") and message_authorized(message):
                     match = re.search(r"/publish\s+(\d+)", text)
                     if not match:
                         send_message(chat_id, "Use: /publish 1")
@@ -478,6 +609,12 @@ def telegram_loop():
                         except Exception as exc:
                             log.exception("Upload failed")
                             send_message(chat_id, f"Upload failed: {exc}")
+                elif message.get("photo") or message.get("document", {}).get("mime_type", "").startswith("image/"):
+                    try:
+                        handle_thumbnail(message)
+                    except Exception as exc:
+                        log.exception("Telegram thumbnail handling failed")
+                        send_message(chat_id, f"Thumbnail process nahi hua: {exc}")
                 elif message.get("video") or message.get("document", {}).get("mime_type", "").startswith("video/"):
                     try:
                         handle_video(message)
