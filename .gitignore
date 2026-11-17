@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.env
+client_secret.json
+token.json
+manager.db
+state.json
+media/
+*.log
