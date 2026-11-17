@@ -16,62 +16,53 @@ Telegram-first YouTube creator automation for **@CoodWithYogesh**.
 
 Scheduled publishing, Telegram comment moderation/replies, dashboard comment inbox, dashboard settings, and recorded-video YouTube Live controls are implemented in the codebase. The live stream can start immediately or be scheduled for a future India-time date/time, and loops the selected recording continuously until you stop it. It requires FFmpeg, an eligible YouTube channel with live streaming enabled, and an always-on host; the process stops if the host sleeps or restarts. The current live process is held in memory, so configure a persistent, always-on worker for long streams.
 
-## Free cloud deployment (Render + Supabase; no Termux / localhost)
+## Render Free only (no Supabase / no Termux / no localhost)
 
-This branch uses Render Free for the web app and Telegram webhook, and Supabase Free for persistent PostgreSQL data, media files, and the YouTube OAuth token. No phone, PC, Termux, or local server is needed.
+The Flask dashboard and Telegram webhook run on Render Free. The database is SQLite at /tmp/manager.db and temporary videos/thumbnails/OAuth token are stored under /tmp. There is no external database or file-storage service.
 
-### 1. Create Supabase project
-
-1. Open https://supabase.com/dashboard and create a Free project.
-2. Set a strong database password and save it safely.
-3. Open Project Settings → API and copy the Project URL and service_role key. Keep the service-role key private; only put it in Render environment variables.
-4. Open Storage → New bucket. Name it exactly youtube-media, keep it Private, and create it.
-5. Open Connect at the top of the project. Select Session pooler and copy the PostgreSQL connection string. Replace its password placeholder with your database password. Use this as SUPABASE_DB_URL.
-
-The app creates its PostgreSQL tables and indexes automatically on first start. You do not need to paste SQL manually.
-
-### 2. Configure Render Web Service
+### Render settings
 
 - Repository: coodwithyogesh-blip/bookish-octo-memory
 - Branch: main after this pull request is merged
 - Build command: pip install -r requirements.txt
 - Start command: gunicorn wsgi:app --workers 1 --threads 8 --timeout 120
 - Health check path: /healthz
-- No persistent disk is required; all durable records/files are stored in Supabase.
+- No persistent disk and no Supabase variables are required.
 
-Add these Render environment variables:
-- SUPABASE_URL — Supabase Project URL.
-- SUPABASE_DB_URL — Supabase Session pooler PostgreSQL connection string.
-- SUPABASE_SERVICE_ROLE_KEY — Supabase service_role key (secret).
-- SUPABASE_STORAGE_BUCKET=youtube-media.
-- TELEGRAM_WEBHOOK_SECRET — a long random secret, at least 32 characters.
-- RENDER_EXTERNAL_URL — your full Render service URL, e.g. https://your-service.onrender.com.
-- TELEGRAM_BOT_TOKEN, OWNER_TELEGRAM_ID, TELEGRAM_GROUP_ID (or bind with /bindgroup).
-- GEMINI_API_KEY, GEMINI_MODEL, GEMINI_IMAGE_MODEL.
-- DASHBOARD_PASSWORD, MANAGER_API_TOKEN, APP_SECRET — three different strong secrets.
-- YOUTUBE_CLIENT_SECRETS_FILE=/etc/secrets/client_secret.json.
-- YOUTUBE_TOKEN_FILE=/tmp/token.json, MEDIA_DIR=/tmp/media (temporary working cache only).
-- AUTO_UPLOAD_DEFAULT=false, AUTO_UPLOAD_PRIVACY=private, AUTO_REPLY_ENABLED=false.
-- TIMEZONE=Asia/Kolkata.
+### Render environment variables
 
-In Render Advanced → Secret Files, add client_secret.json with the full Google OAuth client JSON. Set YOUTUBE_CLIENT_SECRETS_FILE=/etc/secrets/client_secret.json.
+Set the values used by your app:
+- TELEGRAM_BOT_TOKEN
+- OWNER_TELEGRAM_ID
+- TELEGRAM_GROUP_ID (or use /bindgroup)
+- RENDER_EXTERNAL_URL = your complete Render URL
+- TELEGRAM_WEBHOOK_SECRET = a random secret of at least 32 characters
+- GEMINI_API_KEY
+- GEMINI_MODEL and GEMINI_IMAGE_MODEL
+- DASHBOARD_PASSWORD
+- MANAGER_API_TOKEN
+- APP_SECRET
+- YOUTUBE_CLIENT_SECRETS_FILE=/etc/secrets/client_secret.json
+- YOUTUBE_TOKEN_FILE=/tmp/token.json
+- DATABASE_PATH=/tmp/manager.db
+- MEDIA_DIR=/tmp/media
+- AUTO_UPLOAD_DEFAULT=false
+- AUTO_UPLOAD_PRIVACY=private
+- AUTO_REPLY_ENABLED=false
+- TIMEZONE=Asia/Kolkata
 
-### 3. Google OAuth
+In Render Advanced → Secret Files, add client_secret.json with your complete Google OAuth client JSON. Set YOUTUBE_CLIENT_SECRETS_FILE=/etc/secrets/client_secret.json.
 
-Set the Google OAuth Web Client's authorized redirect URI to https://YOUR-RENDER-SERVICE.onrender.com/oauth/callback. Deploy the service, open the Render dashboard, choose Connect YouTube channel, and authorize the channel. The OAuth token is automatically saved in the private Supabase Storage bucket and restored after Render restarts.
+### Telegram webhook
 
-### 4. Telegram webhook
+At startup the app registers https://YOUR-RENDER-SERVICE.onrender.com/telegram/webhook with Telegram. No local polling process is needed. Add the bot to your group, disable Group Privacy in @BotFather, remove/re-add the bot, then send /bindgroup as owner.
 
-On startup the app automatically registers https://YOUR-RENDER-SERVICE.onrender.com/telegram/webhook with Telegram using TELEGRAM_WEBHOOK_SECRET. Do not run Telegram getUpdates polling or a local bot process. Add the bot to the group, disable Group Privacy in @BotFather, remove/re-add the bot, then send /bindgroup as owner.
+### Important Render Free limits
 
-### Free-plan limitations (important)
-
-- Render Free services sleep after a period without inbound traffic. Telegram webhook requests can wake the web service, but comment polling and background jobs cannot run continuously while it sleeps. /comments and the dashboard Comment inbox perform an on-demand refresh when the service is awake.
-- Scheduled YouTube uploads already submitted to YouTube with publishAt can publish at their scheduled time on YouTube's side. Render Free cannot guarantee that a scheduled job which must run inside the app will execute while the service is asleep. Recorded-video live streaming needs an always-on host and is not reliable on Render Free.
-- Supabase Free currently includes 500 MB database, 1 GB file storage, and a 50 MB maximum per uploaded file. Telegram's hosted Bot API download limit is 20 MB, so this bot's Telegram video intake remains limited to 20 MB. Keep total media within the 1 GB bucket quota.
-- Supabase may pause a Free project after a week of low activity. If paused, resume it from the Supabase dashboard. Free plans do not include production backups.
-
-This setup is intended for testing and light use, not guaranteed 24/7 automation. Keep auto-publish and auto-reply disabled until you have tested the workflow.
+- Render Free sleeps after inactivity. Telegram webhook requests can wake it, but scheduled background jobs and continuous comment monitoring are not guaranteed while asleep.
+- The SQLite database and files under /tmp are temporary. A service restart, redeploy, or instance replacement can erase the video queue, comment history, pending thumbnails, and saved YouTube OAuth token. You may need to reconnect YouTube and re-upload pending videos.
+- Keep uploads small: Telegram's hosted Bot API download limit is 20 MB.
+- This setup is suitable for testing/light use. It is not persistent storage or guaranteed 24/7 automation.
 
 ## Google YouTube API setup
 
