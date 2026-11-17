@@ -73,6 +73,18 @@ def init_db():
         con.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
             comment_id TEXT PRIMARY KEY, replied_at TEXT NOT NULL
         )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS scheduled_lives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            privacy TEXT NOT NULL,
+            loop INTEGER NOT NULL,
+            scheduled_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'scheduled',
+            broadcast_id TEXT,
+            created_at TEXT NOT NULL
+        )""")
+        con.execute("UPDATE scheduled_lives SET status='scheduled' WHERE status='starting'")
 
 
 @app.before_request
@@ -402,7 +414,9 @@ def dashboard():
     <p><label>Live title <input id='liveTitle' placeholder='Live stream title'></label>
     <select id='livePrivacy'><option>private</option><option>unlisted</option><option>public</option></select>
     <label><input id='liveLoop' type='checkbox' checked> Loop recorded video continuously</label>
-    <button onclick='startLive()'>Start recorded live</button>
+    <label>Start live at (India time) <input id='liveAt' type='datetime-local'></label>
+    <button onclick='scheduleLive()'>Schedule recorded live</button>
+    <button onclick='startLive()'>Start recorded live now</button>
     <button onclick='stopLive()'>Stop live</button>
     <button onclick='liveStatus()'>Live status</button></p><pre id='controlStatus'>Ready</pre></section>
     <script>
@@ -413,6 +427,10 @@ def dashboard():
     function videoId(){{return Number(document.getElementById('videoId').value);}}
     async function scheduleVideo(){{try{{const t=document.getElementById('publishAt').value;if(!videoId()||!t)throw Error('Video ID and time required');
       await managerApi('/api/schedule',{{video_id:videoId(),publish_at:t.replace('T',' ')}});}}catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
+    async function scheduleLive(){{try{{const t=document.getElementById('liveAt').value;if(!videoId()||!t)throw Error('Video ID and live time required');
+      await managerApi('/api/live/schedule',{{video_id:videoId(),scheduled_at:t.replace('T',' '),title:document.getElementById('liveTitle').value,
+      privacy:document.getElementById('livePrivacy').value,loop:document.getElementById('liveLoop').checked}});}}
+      catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
     async function startLive(){{try{{if(!videoId())throw Error('Video ID required');await managerApi('/api/live/start',{{video_id:videoId(),
       title:document.getElementById('liveTitle').value,privacy:document.getElementById('livePrivacy').value,loop:document.getElementById('liveLoop').checked}});}}
       catch(e){{document.getElementById('controlStatus').textContent=e.message;}}}}
@@ -492,6 +510,63 @@ def schedule_api():
         return jsonify({"error": str(exc)}), 500
 
 
+
+@app.post("/api/live/schedule")
+def live_schedule_api():
+    if not manager_api_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        video_id = int(payload.get("video_id", 0))
+        title = str(payload.get("title") or "").strip()[:100] or "Recorded live stream"
+        privacy = str(payload.get("privacy", "private"))
+        loop = bool(payload.get("loop", True))
+        if privacy not in ("private", "unlisted", "public"):
+            raise ValueError("Invalid live privacy setting")
+        with db() as con:
+            row = con.execute("SELECT file_path FROM videos WHERE id=?", (video_id,)).fetchone()
+            if not row or not Path(row["file_path"]).is_file():
+                return jsonify({"error": "Video queue item or its file was not found"}), 404
+        scheduled = parse_schedule(str(payload.get("scheduled_at", "")), os.getenv("TIMEZONE", "Asia/Kolkata"))
+        with db() as con:
+            cur = con.execute(
+                """INSERT INTO scheduled_lives(video_id,title,privacy,loop,scheduled_at,status,created_at)
+                   VALUES(?,?,?,?,?,'scheduled',?)""",
+                (video_id, title, privacy, int(loop), scheduled.isoformat(), datetime.now(timezone.utc).isoformat())
+            )
+        return jsonify({"ok": True, "schedule_id": cur.lastrowid, "scheduled_at_utc": scheduled.isoformat(),
+                        "timezone": os.getenv("TIMEZONE", "Asia/Kolkata")}), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+def process_scheduled_lives():
+    if live_manager.status()["running"]:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as con:
+        job = con.execute(
+            "SELECT * FROM scheduled_lives WHERE status='scheduled' AND scheduled_at<=? ORDER BY scheduled_at LIMIT 1",
+            (now,)
+        ).fetchone()
+        if not job:
+            return
+        con.execute("UPDATE scheduled_lives SET status='starting' WHERE id=?", (job["id"],))
+        video = con.execute("SELECT file_path FROM videos WHERE id=?", (job["video_id"],)).fetchone()
+    try:
+        if not video or not Path(video["file_path"]).is_file():
+            raise FileNotFoundError("Scheduled live video file is missing")
+        result = live_manager.start(youtube_service(), video["file_path"], job["title"],
+                                    privacy=job["privacy"], loop=bool(job["loop"]))
+        with db() as con:
+            con.execute("UPDATE scheduled_lives SET status='running',broadcast_id=? WHERE id=?",
+                        (result["broadcast_id"], job["id"]))
+    except Exception as exc:
+        log.exception("Scheduled live start failed")
+        with db() as con:
+            con.execute("UPDATE scheduled_lives SET status='failed' WHERE id=?", (job["id"],))
+
+
 @app.post("/api/live/start")
 def live_start_api():
     if not manager_api_authorized():
@@ -541,6 +616,8 @@ def main():
         threading.Thread(target=telegram_loop, daemon=True, name="telegram-poller").start()
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(poll_comment_replies, "interval", minutes=2, id="comment-replies",
+                      max_instances=1, coalesce=True)
+    scheduler.add_job(process_scheduled_lives, "interval", seconds=30, id="scheduled-lives",
                       max_instances=1, coalesce=True)
     scheduler.start()
     port = int(os.getenv("PORT", "10000"))
