@@ -225,12 +225,6 @@ def token_path():
 
 def restore_youtube_token():
     path = token_path()
-    if not path.exists() and storage_configured():
-        try:
-            materialize_file("supabase://" + os.getenv("SUPABASE_STORAGE_BUCKET", "youtube-media") + "/oauth/token.json", path)
-        except requests.HTTPError as exc:
-            if exc.response is None or exc.response.status_code != 404:
-                raise
     return path
 
 
@@ -238,9 +232,7 @@ def save_youtube_token(credentials):
     path = token_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(credentials.to_json(), encoding="utf-8")
-    if storage_configured():
-        persist_file(path, "oauth/token.json")
-
+ 
 
 def youtube_service():
     path = restore_youtube_token()
@@ -476,7 +468,7 @@ def handle_video(message):
     name = message.get("caption") or Path(info["file_path"]).name
     metadata = gemini_metadata(target, name)
     safe_file_id = re.sub(r"[^A-Za-z0-9_-]", "_", file_id)
-    remote_video = persist_file(target, f"videos/{safe_file_id}{suffix}") if storage_configured() else str(target)
+    remote_video = str(target)
     with db() as con:
         cur = con.execute("""INSERT INTO videos
             (telegram_file_id,file_path,original_name,title,description,tags,hashtags,thumbnail_path,status,created_at)
@@ -530,7 +522,7 @@ def handle_thumbnail(message):
             ImageOps.fit(source.convert("RGB"), (1280, 720), method=Image.Resampling.LANCZOS).save(thumb_path, "JPEG", quality=94)
     finally:
         raw.unlink(missing_ok=True)
-    remote_thumb = persist_file(thumb_path, f"thumbnails/video_{pending['video_id']}.jpg") if storage_configured() else str(thumb_path)
+    remote_thumb = str(thumb_path)
     with db() as con:
         con.execute("UPDATE videos SET thumbnail_path=?, status=CASE WHEN youtube_video_id IS NULL THEN 'queued' ELSE status END WHERE id=?",
                     (remote_thumb, pending["video_id"]))
