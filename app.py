@@ -288,6 +288,8 @@ def upload_video(video_id, privacy="private", publish_at=None):
         row = con.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
     if not row:
         raise ValueError("Video queue ID not found")
+    if row["status"] == "awaiting_thumbnail" or not row["thumbnail_path"]:
+        raise ValueError("Custom thumbnail pending. Reply with a thumbnail photo before publishing.")
     service = youtube_service()
     status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": False}
     if publish_at:
@@ -302,13 +304,17 @@ def upload_video(video_id, privacy="private", publish_at=None):
     media = MediaFileUpload(row["file_path"], chunksize=-1, resumable=True)
     result = service.videos().insert(part="snippet,status", body=body, media_body=media).execute()
     yt_id = result["id"]
-    thumb = row["thumbnail_path"]
-    if thumb and Path(thumb).exists():
-        service.thumbnails().set(videoId=yt_id, media_body=MediaFileUpload(thumb)).execute()
     with db() as con:
         final_status = "scheduled" if publish_at else "uploaded"
         con.execute("UPDATE videos SET status=?, youtube_video_id=?, scheduled_at=? WHERE id=?",
                     (final_status, yt_id, publish_at.isoformat() if publish_at else None, video_id))
+    thumb = row["thumbnail_path"]
+    if thumb and Path(thumb).exists():
+        try:
+            service.thumbnails().set(videoId=yt_id, media_body=MediaFileUpload(thumb)).execute()
+        except Exception:
+            # Do not retry the whole video upload if YouTube temporarily rejects the thumbnail.
+            log.exception("Video uploaded, but custom thumbnail could not be applied yet")
     return yt_id
 
 
